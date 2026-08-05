@@ -1,0 +1,43 @@
+version: "3.9"
+
+services:
+  # IBKR Client Portal Gateway 认证自动化
+  ibeam:
+    image: voyz/ibeam
+    container_name: ados-ibeam
+    restart: unless-stopped
+    env_file:
+      - env.list
+    ports:
+      - "5000:5000"
+    volumes:
+      - ibeam-data:/srv/inputs
+
+  # 时间序列数据库
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    container_name: ados-timescaledb
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ados
+      POSTGRES_PASSWORD: changeme_in_env
+      POSTGRES_DB: ados_trade
+    ports:
+      - "5432:5432"
+    volumes:
+      - timescale-data:/var/lib/postgresql/data
+
+  # 实时缓存
+  redis:
+    image: redis:7-alpine
+    container_name: ados-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+
+volumes:
+  ibeam-data:
+  timescale-data:
+  redis-data:
