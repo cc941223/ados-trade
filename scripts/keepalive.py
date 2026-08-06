@@ -4,15 +4,15 @@
 功能：
 1. 每 KEEPALIVE_INTERVAL（默认 50）秒调用一次 /v1/api/tickle，防止 Gateway 会话超时。
 2. 每次调用后检查 /v1/api/iserver/auth/status 的 authenticated 字段。
-3. 当 authenticated 为 false 时，通过企业微信群机器人 webhook 发送告警，
+3. 当 authenticated 为 false 时，通过 Server酱（sctapi.ftqq.com）推送告警到微信，
    内容包含时间戳，并提示需要用手机 IB Key App 确认 2FA 推送。
-4. webhook 地址从环境变量 ALERT_WEBHOOK_URL 读取（在 env.list 中配置），不硬编码。
+4. Server酱 SendKey 从环境变量 SERVERCHAN_SENDKEY 读取（在 env.list 中配置），不硬编码。
 
 环境变量：
-    IBKR_GATEWAY_URL    Gateway 基础地址，默认 https://ibeam:5000（docker-compose 内网服务名）
-    ALERT_WEBHOOK_URL   企业微信群机器人 webhook 地址（必填，见 env.list）
-    KEEPALIVE_INTERVAL  保活轮询间隔秒数，默认 50
-    ALERT_COOLDOWN      告警冷却时间秒数，避免持续掉线时反复刷屏，默认 300
+    IBKR_GATEWAY_URL     Gateway 基础地址，默认 https://ibeam:5000（docker-compose 内网服务名）
+    SERVERCHAN_SENDKEY   Server酱 SendKey（必填，见 env.list，https://sct.ftqq.com 获取）
+    KEEPALIVE_INTERVAL   保活轮询间隔秒数，默认 50
+    ALERT_COOLDOWN       告警冷却时间秒数，避免持续掉线时反复刷屏，默认 300
 """
 
 from __future__ import annotations
@@ -35,17 +35,18 @@ logging.basicConfig(
 log = logging.getLogger("keepalive")
 
 GATEWAY_URL = os.environ.get("IBKR_GATEWAY_URL", "https://ibeam:5000").rstrip("/")
-ALERT_WEBHOOK_URL = os.environ.get("ALERT_WEBHOOK_URL", "").strip()
+SERVERCHAN_SENDKEY = os.environ.get("SERVERCHAN_SENDKEY", "").strip()
 INTERVAL = float(os.environ.get("KEEPALIVE_INTERVAL", "50"))
 ALERT_COOLDOWN = float(os.environ.get("ALERT_COOLDOWN", "300"))
 
 TICKLE_URL = f"{GATEWAY_URL}/v1/api/tickle"
 AUTH_STATUS_URL = f"{GATEWAY_URL}/v1/api/iserver/auth/status"
+SERVERCHAN_URL_TEMPLATE = "https://sctapi.ftqq.com/{sendkey}.send"
 
 BEIJING_TZ = timezone(timedelta(hours=8))
 
 # IBeam/Gateway 使用自签名证书，只对 Gateway 请求跳过证书校验；
-# 企业微信 webhook 走公网 https，仍使用默认证书校验。
+# Server酱 走公网 https，仍使用默认证书校验。
 _INSECURE_SSL_CONTEXT = ssl.create_default_context()
 _INSECURE_SSL_CONTEXT.check_hostname = False
 _INSECURE_SSL_CONTEXT.verify_mode = ssl.CERT_NONE
@@ -81,32 +82,37 @@ def now_str() -> str:
     return datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M:%S %z")
 
 
-def send_wecom_alert(text: str) -> None:
-    """通过企业微信群机器人 webhook 发送文本告警"""
-    if not ALERT_WEBHOOK_URL:
-        log.warning("ALERT_WEBHOOK_URL 未配置，跳过告警发送。原始消息: %s", text)
+def send_serverchan_alert(title: str, desp: str) -> None:
+    """通过 Server酱 (sctapi.ftqq.com) 推送告警到微信"""
+    if not SERVERCHAN_SENDKEY:
+        log.warning("SERVERCHAN_SENDKEY 未配置，跳过告警发送。原始消息: %s / %s", title, desp)
         return
 
-    payload = {"msgtype": "text", "text": {"content": text}}
+    url = SERVERCHAN_URL_TEMPLATE.format(sendkey=SERVERCHAN_SENDKEY)
+    payload = {"title": title, "desp": desp}
     try:
         req = urllib.request.Request(
-            ALERT_WEBHOOK_URL,
+            url,
             data=json.dumps(payload).encode("utf-8"),
             method="POST",
             headers={"Content-Type": "application/json"},
         )
         with urllib.request.urlopen(req, timeout=10) as resp:
-            resp.read()
-        log.info("已发送企业微信告警")
+            raw = resp.read()
+        result = json.loads(raw) if raw else {}
+        if result.get("code") == 0:
+            log.info("已通过 Server酱 发送微信告警")
+        else:
+            log.error("Server酱 返回异常: %s", result)
     except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError) as e:
-        log.error("发送企业微信告警失败: %s", e)
+        log.error("发送 Server酱 告警失败: %s", e)
 
 
 def main() -> None:
-    if not ALERT_WEBHOOK_URL:
+    if not SERVERCHAN_SENDKEY:
         log.warning(
-            "环境变量 ALERT_WEBHOOK_URL 未设置，一旦 Gateway 认证失效将无法发送告警！"
-            "请在 env.list 中配置 ALERT_WEBHOOK_URL。"
+            "环境变量 SERVERCHAN_SENDKEY 未设置，一旦 Gateway 认证失效将无法发送告警！"
+            "请在 env.list 中配置 SERVERCHAN_SENDKEY。"
         )
 
     log.info("IBKR Gateway 保活脚本启动，目标：%s，轮询间隔：%ss", GATEWAY_URL, INTERVAL)
@@ -129,13 +135,13 @@ def main() -> None:
             if not authenticated:
                 now = time.monotonic()
                 if now - last_alert_ts >= ALERT_COOLDOWN:
-                    message = (
-                        "【ADOS-Trade 告警】IBKR Gateway 未认证\n"
-                        f"时间: {now_str()}\n"
-                        "状态: authenticated=false\n"
+                    title = "ADOS-Trade 告警：IBKR Gateway 未认证"
+                    desp = (
+                        f"**时间**: {now_str()}\n\n"
+                        "**状态**: authenticated=false\n\n"
                         "请尽快打开手机 IB Key App 确认 2FA 推送，完成 Gateway 重新登录认证"
                     )
-                    send_wecom_alert(message)
+                    send_serverchan_alert(title, desp)
                     last_alert_ts = now
                 else:
                     log.info("认证失效但仍在告警冷却期内（%.0fs），跳过重复告警", ALERT_COOLDOWN)
