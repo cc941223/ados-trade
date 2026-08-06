@@ -13,6 +13,21 @@ services:
     volumes:
       - ibeam-data:/srv/inputs
 
+  # IBKR Gateway 保活 + 掉线告警（每 50s tickle，authenticated=false 时企业微信告警）
+  keepalive:
+    image: python:3.11-slim
+    container_name: ados-keepalive
+    restart: unless-stopped
+    env_file:
+      - env.list
+    environment:
+      IBKR_GATEWAY_URL: https://ibeam:5000
+    depends_on:
+      - ibeam
+    volumes:
+      - ./scripts:/scripts:ro
+    command: ["python3", "/scripts/keepalive.py"]
+
   # 时间序列数据库
   timescaledb:
     image: timescale/timescaledb:latest-pg16
