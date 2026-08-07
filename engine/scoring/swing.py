@@ -65,14 +65,20 @@ def score_swing(
     put_call_ratio : 由 `engine.indicators.options.put_call_ratio` 算出的比率。
     benchmark_return : 同期大盘或板块 ETF 的涨跌幅（小数），代表"板块/大盘联动"。
     weights : 覆盖 DEFAULT_WEIGHTS 中任意子指标权重的字典。
-    rs_scale, ma_scale, pcr_scale, benchmark_scale : 各子指标线性映射的饱和阈值。
-    va_breakout_scale : 价格突破 Value Area 上/下边界后，用"突破距离 / Value
-        Area 宽度"衡量突破程度，达到 `va_breakout_scale` 个 VA 宽度（默认 1.0，
-        即再突破一个 VA 宽度）时饱和到 ±100。
-    va_in_range_scale : 价格仍在 Value Area 区间内时，该子指标分数的最大幅度
-        （默认 30，明显小于突破区间外时的满分 100——区间内只是"偏向"，不是
-        像突破一样的强信号）。
-    pcr_neutral : Put/Call Ratio 的中性基准值，默认 1.0（Put 与 Call 量相当）。
+    rs_scale, ma_scale, va_breakout_scale, va_in_range_scale, pcr_scale,
+        benchmark_scale : 各子指标线性映射的饱和阈值。
+
+        ⚠️ V1 占位值，待 M3 回测校准：这些饱和阈值（15/0.05/1.0/30/0.5/0.02）
+        规格书都没有给出具体数字，是能让流程先跑起来的主观默认值，和
+        `classify_regime` 里 `threshold=10.0` 性质相同——都需要等 M3
+        walk-forward 回测框架积累历史数据后，反过来校准出更合理的阈值，
+        不是从规格书或历史分布推出来的。目前做成参数就是为了到时候直接传参
+        覆盖，不需要改代码。
+        （`pcr_neutral=1.0` 例外：这不是一个待校准的阈值，而是 Put/Call
+        Ratio 定义本身的中性锚点——Put 量与 Call 量相等就是 1.0，不存在
+        "校准出更好的值"这个问题。）
+    pcr_neutral : Put/Call Ratio 的中性基准值，默认 1.0（Put 与 Call 量相当，
+        定义性常量，非占位值）。
 
     Returns
     -------

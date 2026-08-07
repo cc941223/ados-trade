@@ -63,6 +63,12 @@ def score_intraday(
     vwap_scale, volume_ratio_saturation, atr_z_scale, ma_scale :
         各子指标线性映射的饱和阈值，可按需调参（详见各子指标计算注释）。
 
+        ⚠️ V1 占位值，待 M3 回测校准：这四个饱和阈值（0.01/2.0/2.0/0.01）
+        规格书都没有给出具体数字，是能让流程先跑起来的主观默认值，和
+        `classify_regime` 里 `threshold=10.0` 性质相同——都需要等 M3
+        walk-forward 回测框架积累历史数据后再校准，不是从规格书或历史分布
+        推出来的。做成参数就是为了到时候直接传参覆盖，不需要改代码。
+
     Returns
     -------
     ScoreResult(bull_score, bear_score, confidence_score, sub_scores, extra)

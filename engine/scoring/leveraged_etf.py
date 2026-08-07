@@ -83,9 +83,21 @@ def score_leveraged_etf(
     vix_low, vix_high : VIX 绝对水平的分段阈值，默认 15 / 25，对应规格书
         "<15 低波动，15-25 正常，>25 高波动"；低于 vix_low 视为满分看多
         （规避杠杆损耗的最佳环境），高于 vix_high 视为满分看空，区间内线性过渡。
+        这两个数字**不是占位值**——规格书表 7 原文直接给出了 <15/15-25/>25
+        这三段分界，是有依据的，不需要待 M3 校准（除非未来回测发现这组分段
+        本身不准确，那是另一个层面的问题）。
+    term_structure_neutral : VIX 期限结构比值的中性基准，默认 1.0（近月/远月
+        VIX 相等，定义性常量，非占位值——不存在"校准出更好的中性点"这个问题）。
     term_structure_scale, ma_scale, decay_scale : 各子指标线性映射的饱和阈值。
-    regime_threshold : 传给 `classify_regime` 的 Bull/Bear 差值阈值——V1 占位值，
-        待 M3 回测校准，详见 `classify_regime` 文档。
+
+        ⚠️ V1 占位值，待 M3 回测校准：这三个饱和阈值（0.15/0.05/0.005）
+        规格书都没有给出具体数字，是能让流程先跑起来的主观默认值，和下面
+        `regime_threshold`、`classify_regime` 里的 `threshold=10.0` 性质相同
+        ——都需要等 M3 walk-forward 回测框架积累历史数据后再校准，不是从
+        规格书或历史分布推出来的。做成参数就是为了到时候直接传参覆盖，不需要
+        改代码。
+    regime_threshold : 传给 `classify_regime` 的 Bull/Bear 差值阈值——同样是
+        V1 占位值，待 M3 回测校准，详见 `classify_regime` 文档。
 
     Returns
     -------

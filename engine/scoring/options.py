@@ -63,8 +63,15 @@ def score_options(
     weights : 覆盖 DEFAULT_WEIGHTS 中任意子指标权重的字典。
     iv_skew_scale, term_structure_scale, max_pain_scale, earnings_surprise_scale :
         各子指标线性映射的饱和阈值。
+
+        ⚠️ V1 占位值，待 M3 回测校准：这四个饱和阈值（0.05/0.15/0.03/0.05）
+        规格书都没有给出具体数字，是能让流程先跑起来的主观默认值，和
+        `classify_regime` 里 `threshold=10.0` 性质相同——都需要等 M3
+        walk-forward 回测框架积累历史数据后再校准，不是从规格书或历史分布
+        推出来的。做成参数就是为了到时候直接传参覆盖，不需要改代码。
     term_structure_neutral : IV Term Structure 比值的中性基准，默认 1.0
-        （近月 IV 等于远月 IV）。
+        （近月 IV 等于远月 IV，定义性常量，非占位值——不存在"校准出更好的
+        中性点"这个问题，比值本身就该以 1.0 为中性）。
 
     Returns
     -------
