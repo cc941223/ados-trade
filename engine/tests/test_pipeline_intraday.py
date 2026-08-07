@@ -52,6 +52,38 @@ def test_intraday_pipeline_missing_rsi_is_gap_not_error():
     assert result.sub_scores["price_vs_vwap"].score is not None
 
 
+def test_intraday_pipeline_rsi_real_value_flows_through_correctly():
+    # 验证 rsi 不只是"传了就不缺失"，而是确实按 score_intraday 的公式正确
+    # 参与了计算——用两个不同的 RSI 值（其它输入完全不变）核对：
+    # 1. sub_scores["rsi"].raw_value 精确等于传入的 rsi；
+    # 2. sub_scores["rsi"].score 精确等于 score_intraday 内部公式算出的值
+    #    （score = linear_map(rsi,0,100,100,-100) = 100 - 2*rsi）；
+    # 3. 换一个 RSI 值，最终 Bull/Bear Score 按 RSI 权重(0.20)精确变化——
+    #    证明这个值真的传进了打分逻辑、参与了 Bull/Bear 汇总，不是摆在
+    #    sub_scores 里但没被用上。
+    ohlcv = make_intraday_ohlcv(n=60)
+
+    oversold = run_intraday_pipeline(symbol="AAPL", current_date=date(2026, 8, 5), ohlcv=ohlcv, rsi=20.0)
+    overbought = run_intraday_pipeline(symbol="AAPL", current_date=date(2026, 8, 5), ohlcv=ohlcv, rsi=80.0)
+
+    # raw_value 精确传递
+    assert oversold.sub_scores["rsi"].raw_value == 20.0
+    assert overbought.sub_scores["rsi"].raw_value == 80.0
+
+    # score 精确等于 linear_map 公式的结果：rsi=20 -> 100-40=60（超卖看多）；
+    # rsi=80 -> 100-160=-60（超买看空）
+    assert oversold.sub_scores["rsi"].score == 60.0
+    assert overbought.sub_scores["rsi"].score == -60.0
+
+    # 两次调用其它输入完全相同，Bull/Bear Score 的差异应该精确等于
+    # RSI 权重(0.20，DEFAULT_WEIGHTS["rsi"])乘以两次 RSI 子分数的差异
+    # （60 vs -60，各自只贡献到 Bull 或 Bear 的对应一侧）：
+    #   bull(oversold) - bull(overbought) = 0.20 * (60 - 0) = 12.0
+    #   bear(overbought) - bear(oversold) = 0.20 * (60 - 0) = 12.0
+    assert abs((oversold.bull_score - overbought.bull_score) - 12.0) < 1e-9
+    assert abs((overbought.bear_score - oversold.bear_score) - 12.0) < 1e-9
+
+
 def test_intraday_pipeline_insufficient_history_marks_ma_missing_not_nan():
     # 只给 3 根 K 线，远不够默认 short_ma_period=5/long_ma_period=20/
     # atr_period=14/volume_avg_period=20 的窗口，这几个子指标应该被转成
