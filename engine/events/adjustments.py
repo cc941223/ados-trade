@@ -65,7 +65,7 @@ class EventAdjustment:
         }
 
 
-def _trading_days_between(start: date, end: date) -> int:
+def trading_days_between(start: date, end: date) -> int:
     """start 到 end 之间的交易日数（不含节假日调整）。
 
     `numpy.busday_count(start, end)` 计算半开区间 [start, end) 内的交易日数：
@@ -243,7 +243,7 @@ def apply_event_adjustments(
     #    适用，此时 earnings_date 应为标的个股自身的财报日期）。
     # ------------------------------------------------------------------
     if earnings_date is not None and earnings_applicable:
-        days_until = _trading_days_between(current_date, earnings_date)
+        days_until = trading_days_between(current_date, earnings_date)
         stock_note = f"（标的个股 {underlying_symbol}）" if scenario == "leveraged_etf" and underlying_symbol else ""
 
         # 财报前 earnings_window_days 个交易日内（不含财报当天——规格书原文
@@ -288,7 +288,7 @@ def apply_event_adjustments(
     # 2. OpEx / Triple Witching：仅对期权场景生效（Max Pain 权重调整）。
     # ------------------------------------------------------------------
     if opex_date is not None and scenario == "options":
-        days_until = _trading_days_between(current_date, opex_date)
+        days_until = trading_days_between(current_date, opex_date)
 
         # 距离 OpEx ≤ opex_window_days 个交易日（含 OpEx 当天，即 days_until==0）。
         if 0 <= days_until <= opex_window_days:
@@ -311,7 +311,7 @@ def apply_event_adjustments(
     #    场景生效（Covered Call 是期权策略，提前指派风险只在期权场景下有意义）。
     # ------------------------------------------------------------------
     if ex_dividend_date is not None and scenario == "options" and holds_deep_itm_covered_call:
-        days_until = _trading_days_between(current_date, ex_dividend_date)
+        days_until = trading_days_between(current_date, ex_dividend_date)
         if 0 < days_until <= ex_dividend_window_days:
             independent_warnings.append("提前指派风险")
             _record(
@@ -328,7 +328,7 @@ def apply_event_adjustments(
     #    与单一个股无关）。
     # ------------------------------------------------------------------
     if rebalance_date is not None and rebalance_applicable:
-        days_until = _trading_days_between(current_date, rebalance_date)
+        days_until = trading_days_between(current_date, rebalance_date)
         if 0 <= days_until <= rebalance_window_days:
             multipliers.append(rebalance_confidence_multiplier)
             _record(
@@ -343,7 +343,7 @@ def apply_event_adjustments(
     # 5. 宏观事件：所有场景都生效。
     # ------------------------------------------------------------------
     if macro_event_date is not None:
-        days_since = _trading_days_between(macro_event_date, current_date)
+        days_since = trading_days_between(macro_event_date, current_date)
         if days_since == 0:
             multipliers.append(macro_same_day_multiplier)
             _record("macro", "confidence_multiplier", 1.0, macro_same_day_multiplier, "宏观事件当天")

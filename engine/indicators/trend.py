@@ -1,8 +1,36 @@
-"""第二批 —— 波段趋势指标：ATR、相对强度 RS。"""
+"""第二批 —— 波段趋势指标：ATR、相对强度 RS、简单移动平均。"""
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+
+
+def sma(series: pd.Series, period: int) -> pd.Series:
+    """简单移动平均（Simple Moving Average）。
+
+    这是 `engine/pipeline` 编排层补的一个基础工具函数：`score_intraday` 的
+    均线排列（短/长期均线）、`score_swing` 的中长期均线趋势（50/200 日）、
+    `score_leveraged_etf` 的 200 日均线位置，都需要一个"收盘价 N 日滚动
+    平均"作为输入，但此前 `engine.indicators` 里没有任何函数计算它——`atr`
+    内部虽然也用了 `rolling().mean()`，但那是算真实波幅的滑动平均，不是价格
+    本身的移动平均，不能复用。
+
+    之所以现在补在 `engine.indicators.trend` 而不是直接写进编排层
+    （`engine/pipeline`），是因为编排层的原则是"纯粹调用组装，不引入新的
+    指标计算"——而移动平均恰恰是一个真正的指标计算（哪怕公式极其简单、
+    没有任何主观参数选择的空间），按项目现有的分层方式，指标计算都应该在
+    `engine.indicators` 这一层，编排层只负责调用它、把结果传给 `engine.scoring`。
+
+    Parameters
+    ----------
+    series : 输入序列，通常是收盘价（也可以是任何数值序列，例如成交量）。
+    period : 滑动窗口天数。
+
+    Returns
+    -------
+    Series，与输入对齐；前 period-1 个位置因窗口未满为 NaN。
+    """
+    return series.rolling(window=period, min_periods=period).mean()
 
 
 def true_range(df: pd.DataFrame) -> pd.Series:
