@@ -184,3 +184,75 @@ CREATE INDEX idx_engine_indicators_lookup ON engine_indicators (symbol, indicato
 -- 示例：分钟线数据保留 90 天后自动压缩
 -- =========================================
 -- SELECT add_compression_policy('stock_ohlcv', INTERVAL '90 days');
+
+-- =========================================
+-- 14. 回测信号记录表
+-- 每次评分系统发出一次信号，就记一行，不区分场景（用 scenario 字段区分）
+-- =========================================
+CREATE TABLE backtest_signals (
+    signal_id       BIGSERIAL PRIMARY KEY,
+    symbol          TEXT NOT NULL,
+    scenario        TEXT NOT NULL,        -- 'intraday' / 'swing' / 'options' / 'leveraged_etf'
+    signal_ts       TIMESTAMPTZ NOT NULL, -- 信号触发时间
+    direction       TEXT NOT NULL,        -- 'bull' / 'bear'
+    bull_score      NUMERIC,
+    bear_score      NUMERIC,
+    confidence_score NUMERIC,
+    entry_price     NUMERIC,
+    target_price    NUMERIC,              -- 日内短线：ATR目标价；波段：不适用，留空
+    stop_price      NUMERIC,              -- 日内短线：ATR止损价
+    exit_price      NUMERIC,              -- 实际退出价，未平仓时为空
+    exit_ts         TIMESTAMPTZ,          -- 实际退出时间
+    exit_reason     TEXT,                 -- 'target_hit' / 'stop_hit' / 'time_exit' / 'undecided'
+    outcome         TEXT,                 -- 'win' / 'loss' / 'undecided'
+    raw_return_pct  NUMERIC,              -- 绝对收益率
+    excess_return_pct NUMERIC,            -- 超额收益率（波段场景，扣除基准后）
+    max_drawdown_pct NUMERIC,             -- 持仓期间最大浮亏（期权场景重点用）
+    benchmark_symbol TEXT,                -- 波段/杠杆ETF场景对比的基准（如 QQQ）
+    metadata        JSONB                 -- 存放场景特有字段（比如期权的策略类型、行权价等）
+);
+CREATE INDEX idx_backtest_signals_lookup ON backtest_signals (scenario, symbol, signal_ts DESC);
+
+-- =========================================
+-- 15. 子指标贡献度记录表
+-- 每次信号触发时，把参与计算的每个子指标原始值和子分数都存下来
+-- 这是"数据驱动"的核心：后续相关性分析直接查这张表
+-- =========================================
+CREATE TABLE backtest_indicator_contributions (
+    signal_id       BIGINT REFERENCES backtest_signals(signal_id),
+    indicator_name  TEXT NOT NULL,        -- 'vwap_deviation' / 'rsi' / 'iv_skew' 等
+    raw_value       NUMERIC,              -- 指标原始值
+    normalized_score NUMERIC,             -- 标准化后的 -100~100 子分数
+    weight_used     NUMERIC,              -- 本次计算实际使用的权重（V1固定值或数据驱动值）
+    PRIMARY KEY (signal_id, indicator_name)
+);
+
+-- =========================================
+-- 16. 相关性分析结果表（M3 阶段跑批分析后写入，供权重迭代参考）
+-- =========================================
+CREATE TABLE indicator_correlation_history (
+    analysis_date   DATE NOT NULL,
+    scenario        TEXT NOT NULL,
+    indicator_name  TEXT NOT NULL,
+    sample_size     INTEGER,              -- 参与分析的信号数量
+    correlation_ic  NUMERIC,              -- 信息系数（IC），子指标与未来收益的相关性
+    suggested_weight NUMERIC,             -- 根据 IC 计算出的建议权重
+    is_reliable     BOOLEAN,              -- sample_size 是否达到最低门槛（如 30），未达标则为 false
+    PRIMARY KEY (analysis_date, scenario, indicator_name)
+);
+
+-- =========================================
+-- 17. 事件日历调整记录表（第7章）
+-- 记录财报/OpEx/除息/再平衡/宏观事件对 Confidence Score 的每次调整
+-- =========================================
+CREATE TABLE event_score_adjustments (
+    symbol              TEXT NOT NULL,
+    ts                  TIMESTAMPTZ NOT NULL,
+    scenario            TEXT NOT NULL,
+    event_type          TEXT NOT NULL,        -- 'earnings' / 'opex' / 'ex_dividend' / 'rebalance' / 'macro'
+    adjustment_type     TEXT NOT NULL,         -- 'confidence_multiplier' / 'weight_shift' / 'independent_flag'
+    original_value      NUMERIC,
+    adjusted_value      NUMERIC,
+    note                TEXT,
+    PRIMARY KEY (symbol, ts, scenario, event_type)
+);
