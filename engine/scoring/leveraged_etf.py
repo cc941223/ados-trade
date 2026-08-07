@@ -11,8 +11,24 @@
 |-------------------------------|-----------------------------------------------|---------|
 | VIX 绝对水平                  | ＜15 低波动，15–25 正常，＞25 高波动           | 30%     |
 | VIX 期限结构（9D/VIX/3M）      | Backwardation → Bear regime 倾向              | 25%     |
-| 大盘 200 日均线位置            | 站上 → Bull 基调；跌破 → Bear 基调            | 25%     |
+| 200 日均线位置（输入源见下）    | 站上 → Bull 基调；跌破 → Bear 基调            | 25%     |
 | 波动损耗率（近 30 天实际值）    | 损耗过高 → 提示减少杠杆敞口                    | 20%     |
+
+标的类型区分（规格书 5.5 节"标的类型区分：宽基指数类 vs 单票类"，及表 8）：
+本场景需覆盖两类杠杆 ETF，子指标输入源不同：
+
+| 子指标            | broad_index（如 TQQQ/SQQQ 跟踪 QQQ）      | single_stock（如 TSLL/TSLQ 跟踪 TSLA） |
+|-------------------|---------------------------------------------|-------------------------------------------|
+| VIX 绝对水平/期限结构 | VIX 系列指数（宏观背景，两类共用）        | 同左，不替换                              |
+| 200 日均线位置     | 跟踪的宽基指数自身 200 日均线（如 QQQ）     | 标的个股自身 200 日均线（如 TSLA）        |
+| 波动损耗率         | 公式不变，用宽基指数的日波动率作为输入       | 公式不变，用标的个股的日波动率作为输入     |
+
+也就是说 VIX 两个子指标不区分 `target_type`，直接共用；`underlying_price`/
+`underlying_ma200`（200 日均线位置）与 `daily_decay`（波动损耗率）这两个
+子指标的**输入值**要不要换成标的个股自己的数据，由 `target_type` 决定——
+本函数本身不感知"QQQ 的 200 日均线是多少"或"TSLA 的日波动率是多少"这类
+具体数值，只负责在文档里标注清楚"该传哪个"，调用方在传参前就要按
+`target_type` 选好数据源。
 
 本模块不重新计算 VIX 期限结构比值/波动损耗率，原始值需要调用方先用
 `engine.indicators.leveraged` 里的函数算好再传入。
@@ -29,6 +45,9 @@ DEFAULT_WEIGHTS = {
     "ma200_position": 0.25,
     "volatility_decay": 0.20,
 }
+
+#: target_type 的合法取值，对应规格书 5.5 节"标的类型区分"。
+VALID_TARGET_TYPES = {"broad_index", "single_stock"}
 
 
 def classify_regime(bull_score: float, bear_score: float, threshold: float = 10.0) -> str:
@@ -55,10 +74,11 @@ def classify_regime(bull_score: float, bear_score: float, threshold: float = 10.
 
 
 def score_leveraged_etf(
-    price: Optional[float] = None,
+    target_type: str = "broad_index",
+    underlying_price: Optional[float] = None,
     vix: Optional[float] = None,
     vix_term_structure_ratio: Optional[float] = None,
-    ma200: Optional[float] = None,
+    underlying_ma200: Optional[float] = None,
     daily_decay: Optional[float] = None,
     weights: Optional[dict[str, float]] = None,
     vix_low: float = 15.0,
@@ -73,12 +93,31 @@ def score_leveraged_etf(
 
     Parameters
     ----------
-    price, ma200 : 大盘（或对应指数）当前价格与 200 日均线。
-    vix : VIX 绝对水平。
+    target_type : "broad_index"（默认，如 TQQQ/SQQQ 跟踪 QQQ）或
+        "single_stock"（如 TSLL/TSLQ 跟踪 TSLA）。只影响文档里对
+        `underlying_price`/`underlying_ma200`/`daily_decay` 应该传什么数据源的
+        说明，函数本身不会根据 `target_type` 去改变计算公式或权重——公式和
+        权重两种类型完全一样，区别只在于调用方该传哪个标的的数值。
+    underlying_price, underlying_ma200 : "200 日均线位置"子指标的输入源，
+        按 `target_type` 切换（不再固定用"大盘"）：
+        - `target_type="broad_index"` 时：传跟踪的宽基指数自身的价格/200日均线
+          （例如 TQQQ/SQQQ 传 QQQ 自己的价格和 QQQ 的 200 日均线）；
+        - `target_type="single_stock"` 时：传标的个股自身的价格/200日均线
+          （例如 TSLL/TSLQ 传 TSLA 自己的价格和 TSLA 的 200 日均线，
+          不是大盘指数）。
+    vix : VIX 绝对水平。VIX 相关两个子指标（本项与下面的
+        `vix_term_structure_ratio`）两种 `target_type` 共用同一套输入，不需要
+        区分——两类杠杆 ETF 都受整体市场波动率环境影响，不因标的是指数还是
+        个股而不同。
     vix_term_structure_ratio : 由 `engine.indicators.leveraged.vix_term_structure_ratio`
         算出的 `ratio`（近月/远月，例如 VIX9D/VIX 或 VIX/VIX3M）。
     daily_decay : 由 `engine.indicators.leveraged.volatility_decay_regression`
         算出的 `daily_decay`（近 30 天实际每日波动损耗率，理论上为负）。
+        计算公式不因 `target_type` 而改变，但输入的日波动率数据要切换：
+        `target_type="broad_index"` 时用宽基指数自身的日波动率；
+        `target_type="single_stock"` 时用标的个股自身的日波动率——个股波动率
+        通常显著高于宽基指数，算出来的损耗率数值也会明显更大（更负），这是
+        正常现象，不是计算错误，不需要因此怀疑公式或调低权重。
     weights : 覆盖 DEFAULT_WEIGHTS 中任意子指标权重的字典。
     vix_low, vix_high : VIX 绝对水平的分段阈值，默认 15 / 25，对应规格书
         "<15 低波动，15-25 正常，>25 高波动"；低于 vix_low 视为满分看多
@@ -104,29 +143,45 @@ def score_leveraged_etf(
     ScoreResult(bull_score, bear_score, confidence_score, sub_scores, extra)，
     其中 extra["regime"] 为 "bull" / "chop" / "bear" 三态标签。
     """
+    if target_type not in VALID_TARGET_TYPES:
+        raise ValueError(f"target_type 必须是 {sorted(VALID_TARGET_TYPES)} 之一，收到：{target_type!r}")
+
     w = resolve_weights(DEFAULT_WEIGHTS, weights)
 
     # 1. VIX 绝对水平：<vix_low 满分看多（低波动环境对杠杆 ETF 最友好），
     #    >vix_high 满分看空，区间内线性过渡，vix_low/vix_high 之间的中点
-    #    对应分数 0（规格书 "15-25 正常" 的中性区间）。
+    #    对应分数 0（规格书 "15-25 正常" 的中性区间）。两种 target_type 共用，
+    #    不需要区分。
     vix_score = linear_map(vix, vix_low, vix_high, 100, -100)
 
     # 2. VIX 期限结构：ratio>1（Backwardation）→ Bear regime 倾向，
     #    ratio<1（Contango）→ 正常/偏 Bull，偏离中性值超过 ±term_structure_scale
-    #    （默认 0.15）饱和。
+    #    （默认 0.15）饱和。两种 target_type 共用，不需要区分。
     term_structure_raw = (
         (vix_term_structure_ratio - term_structure_neutral) if vix_term_structure_ratio is not None else None
     )
     term_structure_score = linear_map(term_structure_raw, -term_structure_scale, term_structure_scale, 100, -100)
 
-    # 3. 大盘 200 日均线位置：价格相对 200 日均线的偏离幅度，超过 ±ma_scale
+    # 3. 200 日均线位置：价格相对 200 日均线的偏离幅度，超过 ±ma_scale
     #    （默认 5%）饱和；站上均线 → Bull 基调，跌破 → Bear 基调。
-    ma200_position_raw = (price - ma200) / ma200 if (price is not None and ma200) else None
+    #    输入源按 target_type 切换（broad_index 用跟踪指数自身数据，
+    #    single_stock 用标的个股自身数据），由调用方在传参前选好，本函数
+    #    只是原样使用 underlying_price/underlying_ma200，不做任何切换逻辑。
+    ma200_position_raw = (
+        (underlying_price - underlying_ma200) / underlying_ma200
+        if (underlying_price is not None and underlying_ma200)
+        else None
+    )
     ma200_score = linear_map(ma200_position_raw, -ma_scale, ma_scale, -100, 100)
 
     # 4. 波动损耗率：daily_decay 本身已是带符号的每日损耗率（越负代表损耗越
     #    严重），直接线性映射，达到 ±decay_scale（默认 0.5%/天）饱和；
     #    损耗越严重（越负）→ 越应该"减少杠杆敞口"，对应 Bear 方向分数。
+    #    公式和阈值不因 target_type 而变，但 daily_decay 的输入源要切换
+    #    （broad_index 用宽基指数日波动率算出来的损耗率，single_stock 用标的
+    #    个股日波动率算出来的损耗率）——个股波动率通常显著更高，损耗率数值
+    #    也会明显更负，这是正常现象，不代表计算出错，不需要因此调整这里的
+    #    饱和阈值或怀疑权重。
     decay_score = linear_map(daily_decay, -decay_scale, decay_scale, -100, 100)
 
     sub_scores = {
