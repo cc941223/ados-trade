@@ -89,6 +89,47 @@ def test_earnings_not_applicable_to_leveraged_etf_broad_index():
     assert result.adjustments == []
 
 
+def test_earnings_leveraged_etf_single_stock_triggers_independent_warning():
+    # 规格书新增规则：leveraged_etf + single_stock 的财报临近窗口内，
+    # 除 Confidence×0.5 外，额外触发独立警示，不参与打分。
+    result = apply_event_adjustments(
+        scenario="leveraged_etf",
+        target_type="single_stock",
+        current_date=TODAY,
+        earnings_date=PLUS[2],
+        symbol="TSLL",
+        underlying_symbol="TSLA",
+    )
+
+    assert result.confidence_multiplier == 0.5  # 打分调整照常生效
+    assert "标的个股财报临近，杠杆敞口风险被放大，建议主动降低仓位或提前平仓" in result.independent_warnings
+    # 独立警示不应该影响 confidence_multiplier 或混进 labels
+    assert "标的个股财报临近，杠杆敞口风险被放大，建议主动降低仓位或提前平仓" not in result.labels
+
+    flag_records = [
+        a for a in result.adjustments if a["event_type"] == "earnings" and a["adjustment_type"] == "independent_flag"
+    ]
+    assert len(flag_records) == 1
+    assert "TSLA" in flag_records[0]["note"]
+
+
+def test_earnings_independent_warning_not_triggered_outside_window():
+    result = apply_event_adjustments(
+        scenario="leveraged_etf", target_type="single_stock", current_date=TODAY, earnings_date=PLUS[5]
+    )
+    assert result.independent_warnings == []
+    assert result.confidence_multiplier == 1.0
+
+
+def test_earnings_independent_warning_only_for_leveraged_etf_single_stock():
+    # 同样在财报窗口内，但不是 leveraged_etf+single_stock 组合，
+    # 不应该出现这条独立警示（其它场景的财报规则只影响 Confidence，没有
+    # 对应的独立警示，这是本次新增规则的适用范围限定）。
+    result = apply_event_adjustments(scenario="swing", current_date=TODAY, earnings_date=PLUS[2])
+    assert result.confidence_multiplier == 0.5
+    assert result.independent_warnings == []
+
+
 def test_earnings_already_happened_no_effect():
     # 财报日期已经过去（PLUS[0] 即今天本身，days_until==0，不满足 "> 0"）
     result = apply_event_adjustments(scenario="swing", current_date=TODAY, earnings_date=PLUS[0])
@@ -243,6 +284,26 @@ def test_combine_multipliers_empty_is_one():
 
 def test_combine_multipliers_multiplies_all():
     assert abs(combine_multipliers([0.5, 0.6, 0.7]) - 0.21) < 1e-9
+
+
+def test_combine_multipliers_default_floor_does_not_affect_current_max_two_stack():
+    # 当前规则集里同时最多两个乘数相乘，最低是 0.5*0.6=0.3，
+    # 远高于默认 floor=0.1，默认 floor 不应改变任何现有结果。
+    assert abs(combine_multipliers([0.5, 0.6]) - 0.3) < 1e-9
+
+
+def test_combine_multipliers_floor_clips_low_product():
+    # 人为构造一个远低于默认 floor 的连乘，验证下限生效
+    raw_product = 0.5 * 0.6 * 0.05  # = 0.015，远低于默认 floor=0.1
+    assert raw_product < 0.1
+    assert combine_multipliers([0.5, 0.6, 0.05]) == 0.1
+
+
+def test_combine_multipliers_custom_floor_override():
+    # floor 可以覆盖为其它值：product=0.5*0.6=0.3，floor=0.4 时应被夹到 0.4
+    assert combine_multipliers([0.5, 0.6], floor=0.4) == 0.4
+    # floor 低于 product 时不生效
+    assert abs(combine_multipliers([0.5, 0.6], floor=0.05) - 0.3) < 1e-9
 
 
 def test_earnings_and_macro_same_day_stack_multiplicatively():
