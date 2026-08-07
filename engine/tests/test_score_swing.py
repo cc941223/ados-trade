@@ -19,7 +19,11 @@
 
     Bull = .25*100(ma_trend) + .15*100(pcr) = 25+15 = 40
     Bear = .30*100(rs) + .20*100(volume_profile) + .10*100(sector) = 30+20+10 = 60
-    completeness=1, consistency=|40-60|/100=0.2, confidence=(1*0.5+0.2*0.5)*100=60
+    completeness=1
+    strength=(40+60)/100=1.0（本场景刚好全部子指标都饱和到±100，Bull+Bear=100，
+    strength 达到理论上限，这种情况下 conviction 与旧版 consistency 数值相同，
+    等于 agreement=|40-60|/100=0.2）
+    confidence=(1*0.5+0.2*0.5)*100=60
 """
 from engine.scoring.swing import score_swing
 

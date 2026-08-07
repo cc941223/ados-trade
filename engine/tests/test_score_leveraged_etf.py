@@ -17,7 +17,9 @@
 
     Bull = .25*100(ma200) = 25
     Bear = .30*100(vix) + .25*100(term) = 30+25 = 55
-    completeness=1, consistency=|25-55|/80=0.375, confidence=(1*0.5+0.375*0.5)*100=68.75
+    completeness=1
+    strength=(25+55)/100=0.8, agreement=|25-55|/80=0.375, conviction=0.8*0.375=0.3
+    confidence=(1*0.5+0.3*0.5)*100=65
     diff = 25-55 = -30 < -10 -> regime="bear"
 """
 import pytest
@@ -51,7 +53,7 @@ def test_score_leveraged_etf_contradictory_manual():
 
     assert abs(result.bull_score - 25.0) < 1e-6
     assert abs(result.bear_score - 55.0) < 1e-6
-    assert abs(result.confidence_score - 68.75) < 1e-6
+    assert abs(result.confidence_score - 65.0) < 1e-6
     assert result.extra["regime"] == "bear"
 
 

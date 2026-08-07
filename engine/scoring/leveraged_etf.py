@@ -36,6 +36,15 @@ def classify_regime(bull_score: float, bear_score: float, threshold: float = 10.
 
     差值超过 `threshold`（默认 10 分）才判定为方向明确的 Bull/Bear，否则
     视为 Chop（多空力量接近，倾向横盘震荡，杠杆敞口应保守）。
+
+    ⚠️ V1 占位阈值，待 M3 回测校准：`threshold=10.0` 不是从规格书或历史数据推
+    出来的，规格书第 5.5 节只定义了"要分 Bull/Chop/Bear 三态"，没有给出具体
+    分界数值。10.0 只是一个能让流程先跑起来的主观默认值，和规格书里 Max Pain
+    （"此假设在学术与实务界均有争议，不作为唯一决策依据"）、杠杆 ETF 波动损耗
+    近似公式（"假设性质，需第 6 章验证"）性质相同——都属于需要用 M3 walk-forward
+    回测框架、拿历史上 Bull-Bear 差值分布去反推"能最好区分事后真趋势与事后真
+    横盘"的阈值后再替换的占位值。目前把它做成参数就是为了到时候直接传参覆盖，
+    不需要改代码。
     """
     diff = bull_score - bear_score
     if diff > threshold:
@@ -75,7 +84,8 @@ def score_leveraged_etf(
         "<15 低波动，15-25 正常，>25 高波动"；低于 vix_low 视为满分看多
         （规避杠杆损耗的最佳环境），高于 vix_high 视为满分看空，区间内线性过渡。
     term_structure_scale, ma_scale, decay_scale : 各子指标线性映射的饱和阈值。
-    regime_threshold : 传给 `classify_regime` 的 Bull/Bear 差值阈值。
+    regime_threshold : 传给 `classify_regime` 的 Bull/Bear 差值阈值——V1 占位值，
+        待 M3 回测校准，详见 `classify_regime` 文档。
 
     Returns
     -------

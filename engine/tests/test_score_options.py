@@ -10,7 +10,11 @@
     权重 0.25/0.20/0.20/0.20/0.15：
     Bull = .25*100+.20*100+.20*100+.20*0+.15*100 = 25+20+20+0+15 = 80
     Bear = 0
-    completeness=1, consistency=1, confidence=100
+    completeness=1
+    strength=(80+0)/100=0.8, agreement=|80-0|/80=1.0, conviction=0.8
+    confidence = (1*0.5 + 0.8*0.5)*100 = 90
+    （Bull 没有饱和到 100——因为 iv_percentile 子指标恒记 0 分，稀释了整体强度，
+    所以即便完全同向也不是满分置信度）
 
 场景 B（子指标互相矛盾）：
     iv_skew=+0.05（正skew，看空）        -> -100
@@ -20,7 +24,9 @@
 
     Bull = .20*100(max_pain) + .15*100(earnings) = 20+15 = 35
     Bear = .25*100(skew) + .20*100(term) = 25+20 = 45
-    completeness=1, consistency=|35-45|/80=0.125, confidence=(1*0.5+0.125*0.5)*100=56.25
+    completeness=1
+    strength=(35+45)/100=0.8, agreement=|35-45|/80=0.125, conviction=0.8*0.125=0.1
+    confidence=(1*0.5+0.1*0.5)*100=55
 """
 import pytest
 
@@ -40,7 +46,7 @@ def test_score_options_all_bullish_manual():
 
     assert abs(result.bull_score - 80.0) < 1e-6
     assert result.bear_score == 0.0
-    assert abs(result.confidence_score - 100.0) < 1e-6
+    assert abs(result.confidence_score - 90.0) < 1e-6
 
 
 def test_score_options_contradictory_manual():
@@ -56,7 +62,7 @@ def test_score_options_contradictory_manual():
 
     assert abs(result.bull_score - 35.0) < 1e-6
     assert abs(result.bear_score - 45.0) < 1e-6
-    assert abs(result.confidence_score - 56.25) < 1e-6
+    assert abs(result.confidence_score - 55.0) < 1e-6
 
 
 def test_score_options_contradictory_confidence_lower_than_aligned():

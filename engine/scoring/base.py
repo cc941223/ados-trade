@@ -6,9 +6,9 @@
   与"多空双强"等场景的区分度。
 - 每个子指标先标准化为 -100 ~ +100 的可比子分数，再按权重加权求和。
 - Confidence Score 不是第三个方向性分数，而是本次 Bull/Bear Score 计算结果的
-  可信程度，由数据完整度与子指标间方向一致性共同决定
-  （规格书原文还提到第三个因素"当前是否处于历史极端行情"，该因素依赖历史分布
-  数据，M3 回测框架积累数据后再补充，V1 版本先只用完整度+一致性两项）。
+  可信程度，由数据完整度、方向一致性、证据绝对强度共同决定
+  （规格书原文还提到"当前是否处于历史极端行情"这个第四因素，依赖历史分布
+  数据，M3 回测框架积累数据后再补充，V1 版本先用这三项）。
 - V1 阶段权重为主观设定，全部支持从外部传入覆盖，为以后从
   `indicator_correlation_history` 表读数据驱动权重做准备。
 
@@ -105,17 +105,31 @@ def resolve_weights(default_weights: dict[str, float], overrides: Optional[dict[
 
     只允许覆盖已知的子指标名（`default_weights` 的 key），未知 key 直接报错，
     避免权重表拼写错误被静默忽略。
+
+    权重必须非负：`aggregate_scores` 依赖"所有权重 ≥ 0"这个前提才能保证
+    `Bull Score + Bear Score ≤ 100`（详见该函数文档），负权重会打破这个不变量，
+    因此在权重合并这一步就直接拒绝，而不是留到聚合阶段才隐晦地出错。
     """
     if overrides is None:
-        return dict(default_weights)
+        merged = dict(default_weights)
+    else:
+        unknown = set(overrides) - set(default_weights)
+        if unknown:
+            raise ValueError(f"未知的子指标权重覆盖项：{sorted(unknown)}")
+        merged = dict(default_weights)
+        merged.update(overrides)
 
-    unknown = set(overrides) - set(default_weights)
-    if unknown:
-        raise ValueError(f"未知的子指标权重覆盖项：{sorted(unknown)}")
+    negative = {k: v for k, v in merged.items() if v < 0}
+    if negative:
+        raise ValueError(f"权重不能为负数：{negative}")
 
-    merged = dict(default_weights)
-    merged.update(overrides)
     return merged
+
+
+#: Bull Score + Bear Score 的理论上界（见 aggregate_scores 文档里的证明）。
+#: 允许极小的浮点误差余量，超过这个余量就认定是真实的越界 bug 而不是舍入误差。
+_MAX_SIGNAL_SUM = 100.0
+_SIGNAL_SUM_EPS = 1e-9
 
 
 def aggregate_scores(sub_scores: dict[str, SubScore]) -> ScoreResult:
@@ -133,12 +147,25 @@ def aggregate_scores(sub_scores: dict[str, SubScore]) -> ScoreResult:
        （一部分看多一部分看空），Bull 和 Bear 会同时呈现中等值，能区分出
        "多空双强"与"单边行情"，符合 5.1 节设计原则。
     4. 完整度 completeness = 可用子指标权重合计 / 全部子指标权重合计。
-    5. 一致性 consistency = |Bull-Bear| / (Bull+Bear)，取值 0~1：
-       全部子指标同向时 Bull 和 Bear 一个接近 0，consistency 接近 1；
-       多空势均力敌时 Bull≈Bear，consistency 接近 0（矛盾程度最高）。
-       没有任何有效信号（Bull=Bear=0）时约定 consistency=1（无信号不算矛盾）。
-    6. Confidence Score = (completeness × 0.5 + consistency × 0.5) × 100，
-       完整度和一致性各占一半权重，两者任一偏低都会拉低整体置信度。
+    5. Bull Score + Bear Score ≤ 100 这个不变量：
+       只要 (a) 每个子指标 score 都落在 [-100,100] 内（`linear_map` 默认
+       clip=True 保证），且 (b) 所有权重非负（`resolve_weights` 已校验），
+       就有 Bull+Bear = Σ weight_i×|score_i| / Σweight_i ≤ Σweight_i×100 /
+       Σweight_i = 100。下面用一个断言把这个不变量显式校验出来——一旦违反，
+       说明存在越界 score 或负权重绕过了校验，直接报错而不是靠 clip 悄悄掩盖。
+    6. 用两个独立维度刻画"多空证据"，而不是只看相对比例：
+       - strength（绝对强度）= (Bull+Bear) / 100 ∈ [0,1]：证据总量有多大；
+       - agreement（方向一致性）= |Bull-Bear| / (Bull+Bear) ∈ [0,1]：
+         证据总量里有多大比例指向同一个方向；Bull=Bear=0（无信号）时约定为 0。
+       conviction（方向性证据的可信度）= strength × agreement。
+       两者任一趋近 0，conviction 就趋近 0——证据太弱、或证据互相矛盾，都不该
+       给高置信度。（代数上 conviction 恰好等于 |Bull-Bear|/100，因为 strength
+       分母与 agreement 分母的 (Bull+Bear) 相消；这里仍然分开计算 strength 和
+       agreement 两个量存进 extra，是为了给 M3 回测留痕——区分"置信度低是因为
+       证据太弱"还是"因为证据打架"，对排查子指标质量更有意义，单一的 conviction
+       数值看不出这个区别。）
+    7. Confidence Score = (completeness × 0.5 + conviction × 0.5) × 100，
+       完整度和 conviction 各占一半权重，任一偏低都会拉低整体置信度。
     """
     total_weight_all = sum(s.weight for s in sub_scores.values())
     available = {k: s for k, s in sub_scores.items() if s.score is not None}
@@ -150,16 +177,30 @@ def aggregate_scores(sub_scores: dict[str, SubScore]) -> ScoreResult:
     bull_score = sum(s.weight * max(s.score, 0.0) for s in available.values()) / total_weight_available
     bear_score = sum(s.weight * max(-s.score, 0.0) for s in available.values()) / total_weight_available
 
-    completeness = total_weight_available / total_weight_all
     total_signal = bull_score + bear_score
-    consistency = abs(bull_score - bear_score) / total_signal if total_signal > 0 else 1.0
+    if total_signal > _MAX_SIGNAL_SUM + _SIGNAL_SUM_EPS:
+        raise ValueError(
+            f"Bull Score + Bear Score = {total_signal} 超过理论上界 {_MAX_SIGNAL_SUM}，"
+            "说明存在子指标 score 越出 [-100,100]（可能绕过了 linear_map 的 clip）"
+            "或权重表里混入了负权重（resolve_weights 校验被绕过），需要排查调用方。"
+        )
 
-    confidence_score = (completeness * 0.5 + consistency * 0.5) * 100
+    completeness = total_weight_available / total_weight_all
+    strength = total_signal / _MAX_SIGNAL_SUM
+    agreement = abs(bull_score - bear_score) / total_signal if total_signal > 0 else 0.0
+    conviction = strength * agreement
+
+    confidence_score = (completeness * 0.5 + conviction * 0.5) * 100
 
     return ScoreResult(
         bull_score=bull_score,
         bear_score=bear_score,
         confidence_score=confidence_score,
         sub_scores=sub_scores,
-        extra={"completeness": completeness, "consistency": consistency},
+        extra={
+            "completeness": completeness,
+            "strength": strength,
+            "agreement": agreement,
+            "conviction": conviction,
+        },
     )

@@ -10,7 +10,12 @@
     权重：0.25/0.20/0.25/0.15/0.15
     Bull = .25*100+.20*60+.25*100+.15*50+.15*100 = 25+12+25+7.5+15 = 84.5
     Bear = 0
-    completeness=1, consistency=1 -> confidence=100
+    completeness=1
+    strength=(84.5+0)/100=0.845, agreement=|84.5-0|/84.5=1.0, conviction=0.845
+    confidence = (1*0.5 + 0.845*0.5)*100 = 92.25
+    （注意：Bull 没有饱和到 100，所以即便完全同向、无矛盾，conviction 也不是
+    满分 1——这正是本次修正要解决的问题：证据强度不足时，即使方向一致，也不该
+    给出满分置信度。）
 
 场景 B（子指标互相矛盾）：
     price_vs_vwap 同场景 A -> +100（看多）
@@ -21,8 +26,10 @@
 
     Bull = .25*100 + .15*50 = 25+7.5 = 32.5
     Bear = .20*80 + .25*100 + .15*100 = 16+25+15 = 56
-    completeness=1, consistency=|32.5-56|/88.5=0.265536...
-    confidence = (1*0.5+0.265536*0.5)*100 = 63.2768...
+    completeness=1
+    strength=(32.5+56)/100=0.885, agreement=|32.5-56|/88.5=0.265536...
+    conviction=0.885*0.265536...=0.235
+    confidence = (1*0.5+0.235*0.5)*100 = 61.75
 """
 from engine.scoring.intraday import DEFAULT_WEIGHTS, score_intraday
 
@@ -42,7 +49,7 @@ def test_score_intraday_all_bullish_manual():
 
     assert abs(result.bull_score - 84.5) < 1e-6
     assert result.bear_score == 0.0
-    assert abs(result.confidence_score - 100.0) < 1e-6
+    assert abs(result.confidence_score - 92.25) < 1e-6
 
 
 def test_score_intraday_contradictory_manual():
@@ -60,7 +67,7 @@ def test_score_intraday_contradictory_manual():
 
     assert abs(result.bull_score - 32.5) < 1e-6
     assert abs(result.bear_score - 56.0) < 1e-6
-    assert abs(result.confidence_score - 63.2768) < 1e-3
+    assert abs(result.confidence_score - 61.75) < 1e-3
 
 
 def test_score_intraday_contradictory_confidence_lower_than_aligned():
