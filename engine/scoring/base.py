@@ -156,14 +156,29 @@ def aggregate_scores(sub_scores: dict[str, SubScore]) -> ScoreResult:
     6. 用两个独立维度刻画"多空证据"，而不是只看相对比例：
        - strength（绝对强度）= (Bull+Bear) / 100 ∈ [0,1]：证据总量有多大；
        - agreement（方向一致性）= |Bull-Bear| / (Bull+Bear) ∈ [0,1]：
-         证据总量里有多大比例指向同一个方向；Bull=Bear=0（无信号）时约定为 0。
-       conviction（方向性证据的可信度）= strength × agreement。
+         证据总量里有多大比例指向同一个方向。
+       conviction（方向性证据的可信度）概念上定义为 strength × agreement：
        两者任一趋近 0，conviction 就趋近 0——证据太弱、或证据互相矛盾，都不该
-       给高置信度。（代数上 conviction 恰好等于 |Bull-Bear|/100，因为 strength
-       分母与 agreement 分母的 (Bull+Bear) 相消；这里仍然分开计算 strength 和
-       agreement 两个量存进 extra，是为了给 M3 回测留痕——区分"置信度低是因为
-       证据太弱"还是"因为证据打架"，对排查子指标质量更有意义，单一的 conviction
-       数值看不出这个区别。）
+       给高置信度。
+
+       但代数上可以证明 strength × agreement 恒等于 |Bull-Bear| / 100：
+
+           strength × agreement
+             = [(Bull+Bear)/100] × [|Bull-Bear|/(Bull+Bear)]
+             = |Bull-Bear| / 100        （(Bull+Bear) 项在分子分母间相消）
+
+       这个等价关系在 Bull,Bear≥0 且 Bull+Bear≤100（第 5 点已证明的不变量）下
+       对所有取值都成立，包括 Bull=Bear=0 的边界——|Bull-Bear|/100 在该点自然
+       等于 0，不需要像 agreement 定义那样为"分母为 0"单独写特判分支。因此
+       **实际计算直接用 `abs(bull_score-bear_score)/100`**，不重复算一遍再相乘，
+       彻底消除除零特判的必要，代码也更健壮（不会因为 strength/agreement 各自
+       的边界处理不一致而产生隐藏 bug）。
+
+       `strength` 和 `agreement` 仍然分开算出来存进 `extra` 字段展示（此时才需要
+       对 `total_signal==0` 做特判，仅用于展示，不影响 conviction 的计算结果）——
+       这是为了给 M3 回测留痕、方便调试：区分"置信度低是因为证据太弱"还是
+       "因为证据打架"，对排查子指标质量更有意义，单一的 conviction 数值看不出
+       这个区别。
     7. Confidence Score = (completeness × 0.5 + conviction × 0.5) × 100，
        完整度和 conviction 各占一半权重，任一偏低都会拉低整体置信度。
     """
@@ -186,9 +201,16 @@ def aggregate_scores(sub_scores: dict[str, SubScore]) -> ScoreResult:
         )
 
     completeness = total_weight_available / total_weight_all
+
+    # conviction 的核心计算：直接用 |Bull-Bear|/100，不经过 strength*agreement
+    # 再相乘——两者代数恒等（见函数文档），但直接算这个更简单，且天然不需要为
+    # total_signal==0 写除零特判（|Bull-Bear| 在该点也是 0）。
+    conviction = abs(bull_score - bear_score) / _MAX_SIGNAL_SUM
+
+    # strength / agreement 只用于 extra 里的诊断展示，不参与 conviction 计算；
+    # 这里才需要对 total_signal==0 单独处理（约定 agreement=0，无信号不算"一致"）。
     strength = total_signal / _MAX_SIGNAL_SUM
     agreement = abs(bull_score - bear_score) / total_signal if total_signal > 0 else 0.0
-    conviction = strength * agreement
 
     confidence_score = (completeness * 0.5 + conviction * 0.5) * 100
 

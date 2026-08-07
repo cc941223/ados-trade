@@ -1,10 +1,22 @@
 """engine.scoring.base 单元测试 —— linear_map / resolve_weights / aggregate_scores。
 
-Confidence Score 用两个独立维度刻画多空证据：
+Confidence Score 概念上用两个独立维度刻画多空证据：
     strength（绝对强度）  = (Bull+Bear) / 100
     agreement（方向一致性）= |Bull-Bear| / (Bull+Bear)，Bull=Bear=0 时约定为 0
     conviction            = strength * agreement
-    confidence            = (completeness*0.5 + conviction*0.5) * 100
+
+但 `aggregate_scores` 的实际实现里，conviction 不是真的按 strength*agreement
+相乘算出来的，而是直接用等价的化简式：
+
+    conviction = |Bull-Bear| / 100
+
+两者代数恒等——strength 分母的 (Bull+Bear) 和 agreement 分母的 (Bull+Bear)
+相消，剩下 |Bull-Bear|/100，且这个恒等式在 Bull=Bear=0 的边界也成立（两边都
+等于 0），所以直接用化简式还省掉了 agreement 定义里"分母为 0"的特判分支。
+strength 和 agreement 仍然分开算出来，只是放进 `extra` 字段做诊断展示（这里
+才需要那个特判），不影响 conviction 本身的计算路径。
+
+confidence = (completeness*0.5 + conviction*0.5) * 100
 
 Bull+Bear 有理论上界 100（每个子指标 score∈[-100,100] 且权重非负），
 下面同时验证这个不变量在越界输入时会被显式拒绝，而不是被 clip 悄悄掩盖。
@@ -138,13 +150,44 @@ def test_aggregate_scores_strong_vs_weak_disagreement_are_distinguished():
     assert abs(weak.bull_score - 5.0) < 1e-9
     assert abs(weak.bear_score - 4.5) < 1e-9
 
-    # 两者的相对差距（agreement）相同
+    # 两者的相对差距（agreement，仅用于 extra 诊断展示）相同
     assert abs(strong.extra["agreement"] - weak.extra["agreement"]) < 1e-9
     # 但绝对强度（strength）不同，导致 conviction 与 confidence 不同
     assert strong.extra["strength"] > weak.extra["strength"]
     assert strong.confidence_score > weak.confidence_score
+
+    # conviction 实际按 |Bull-Bear|/100 直接算出（而非 strength*agreement 相乘），
+    # 两种写法代数恒等：strong 是 |50-45|/100=0.05，weak 是 |5-4.5|/100=0.005，
+    # 与用 strength*agreement 算出来的结果完全一致（0.95*0.05263...=0.05，
+    # 0.095*0.05263...=0.005），这里直接用化简后的公式验证。
     assert abs(strong.extra["conviction"] - 0.05) < 1e-9
     assert abs(weak.extra["conviction"] - 0.005) < 1e-9
+
+
+def test_aggregate_scores_conviction_equals_strength_times_agreement_identity():
+    # 直接验证 conviction(=|Bull-Bear|/100) 与 strength*agreement 代数恒等，
+    # 覆盖若干合法取值（Bull,Bear>=0 且 Bull+Bear<=100），包括零信号边界——
+    # 该边界下 agreement 走的是"分母为0约定为0"分支，strength=0，两个写法
+    # 仍然一致给出 0，说明化简公式天然覆盖了这个边界，不需要额外特判。
+    cases = [
+        {"a": SubScore("a", 1.0, 100.0, 0.5), "b": SubScore("b", -1.0, -90.0, 0.5)},  # 50 vs 45
+        {"a": SubScore("a", 1.0, 10.0, 0.5), "b": SubScore("b", -1.0, -9.0, 0.5)},  # 5 vs 4.5
+        {"a": SubScore("a", 1.0, 100.0, 1.0)},  # 100 vs 0（完全一致且饱和）
+        {"a": SubScore("a", 1.0, 0.0, 1.0)},  # 0 vs 0（零信号边界）
+        {
+            "a": SubScore("a", 1.0, 100.0, 0.25),
+            "b": SubScore("b", -1.0, -100.0, 0.25),
+            "c": SubScore("c", -1.0, -100.0, 0.25),
+            "d": SubScore("d", -1.0, -100.0, 0.25),
+        },  # 25 vs 75
+    ]
+    for sub_scores in cases:
+        result = aggregate_scores(sub_scores)
+        strength = result.extra["strength"]
+        agreement = result.extra["agreement"]
+        conviction = result.extra["conviction"]
+        assert abs(conviction - strength * agreement) < 1e-9
+        assert abs(conviction - abs(result.bull_score - result.bear_score) / 100.0) < 1e-9
 
 
 def test_aggregate_scores_missing_indicator_lowers_completeness():
