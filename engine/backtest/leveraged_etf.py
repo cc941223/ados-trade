@@ -33,17 +33,18 @@ def evaluate_leveraged_etf_regime(
     -------
     SignalOutcome：
 
-    - `outcome`："win" 如果策略夏普比率高于基准夏普比率，否则 "loss"。
+    - `outcome`："win" 需要同时满足两个条件（AND，缺一不可）：
+      1. 策略夏普比率 > 基准夏普比率（风险调整后收益跑赢基准）；
+      2. 策略最大回撤 不劣于 基准最大回撤，即 `strategy_max_dd >=
+         benchmark_max_dd`（两者都是 ≤0 的负数，"不劣于"是数值上更接近
+         0 或更大，代表回撤更轻）。
+      任一条件不满足就判 "loss"。
 
-      ⚠️ 规格书原文"评估标准为风险调整后收益（如夏普比率）与最大回撤，
-      而非单看收益率"只说了要看这两个指标，没有给出"两个指标都要满足
-      才算赢"还是"看哪一个"的组合规则。这里的处理是：`outcome` 只按
-      夏普比率高低判定（风险调整后收益是否跑赢基准），最大回撤单独存进
-      `max_drawdown_pct`（策略自身）和 `extra["benchmark_max_drawdown_pct"]`
-      （基准）留痕，供人工核对"是不是回撤更小"，不参与 `outcome` 的判定
-      逻辑——这是我的设计选择，规格书没有明确到这个细节，需要你确认，
-      如果你认为应该要求"夏普更高且回撤更小才算赢"，告诉我可以改成
-      两个条件同时满足的 AND 逻辑。
+      这是按规格书 6.2 节原文"评估标准为风险调整后收益（如夏普比率）与
+      最大回撤，而非单看收益率——杠杆 ETF 波动巨大，Regime 判断的价值
+      应体现在回撤更小，而非仅收益更高"实现的：如果只看夏普比率，回撤
+      这个指标就成了摆设（算出来但不影响任何判定），跟规格书强调的重点
+      矛盾，所以改成两个条件都要满足的 AND 逻辑。
     - 两条收益率序列长度不足 2（夏普比率算不出来）时，`outcome` 为
       "undecided"。
     - `raw_return_pct`：策略累计收益率。`excess_return_pct`：策略累计
@@ -66,7 +67,9 @@ def evaluate_leveraged_etf_regime(
     if strategy_sharpe is None or benchmark_sharpe is None:
         outcome = "undecided"
     else:
-        outcome = "win" if strategy_sharpe > benchmark_sharpe else "loss"
+        sharpe_better = strategy_sharpe > benchmark_sharpe
+        drawdown_not_worse = strategy_max_dd >= benchmark_max_dd
+        outcome = "win" if (sharpe_better and drawdown_not_worse) else "loss"
 
     return SignalOutcome(
         outcome=outcome,
