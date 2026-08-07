@@ -32,6 +32,23 @@ def test_spearman_correlation_matches_scipy():
     assert abs(result.correlation_ic - expected) < 1e-9
 
 
+def test_default_method_is_spearman_not_pearson():
+    # 默认不传 method 时应该走 Spearman（跟量化圈"IC"的行业惯例对齐），
+    # 不是 Pearson——用一组两种方法算出来数值不同的数据（有并列值，
+    # pearson≈0.7746，spearman≈0.7379）验证默认值确实是 spearman，
+    # 不只是碰巧两种方法结果一样导致测试测不出区别。
+    x = [1, 2, 3, 4, 5]
+    y = [2, 4, 5, 4, 5]
+    pearson_expected, _ = pearsonr(x, y)
+    spearman_expected, _ = spearmanr(x, y)
+    assert abs(pearson_expected - spearman_expected) > 1e-3  # 确认两种方法在这组数据上确实有区别
+
+    default_result = compute_information_coefficient(x, y)  # 不传 method
+
+    assert abs(default_result.correlation_ic - spearman_expected) < 1e-9
+    assert abs(default_result.correlation_ic - pearson_expected) > 1e-3
+
+
 def test_perfect_positive_correlation():
     x = [1, 2, 3, 4, 5]
     y = [10, 20, 30, 40, 50]

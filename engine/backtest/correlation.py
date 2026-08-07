@@ -49,7 +49,7 @@ class ICResult:
 def compute_information_coefficient(
     indicator_values: list[float],
     future_returns: list[float],
-    method: str = "pearson",
+    method: str = "spearman",
     min_sample_size: int = MIN_RELIABLE_SAMPLE_SIZE,
     indicator_name: Optional[str] = None,
     scenario: Optional[str] = None,
@@ -63,16 +63,14 @@ def compute_information_coefficient(
     future_returns : 对应每次信号触发后的未来实际收益率，长度、顺序需要
         跟 `indicator_values` 一一对应（第 i 个指标值对应第 i 次信号的
         未来收益）。
-    method : "pearson"（默认，线性相关系数）或 "spearman"（秩相关系数，
-        对非线性单调关系更稳健，是量化领域"IC"更常见的定义）。
+    method : "spearman"（默认，秩相关系数）或 "pearson"（线性相关系数）。
 
-        ⚠️ 规格书原文只写"计算其历史取值与未来实际收益的信息系数（IC）"，
-        没有指明具体用皮尔逊还是斯皮尔曼相关系数——这是我需要你确认的一
-        个点：量化因子研究里"IC"更多情况下默认指斯皮尔曼秩相关（对异常值
-        更稳健，且不要求线性关系），但也有直接用皮尔逊的用法。默认选了
-        更直白的 "pearson"（跟任务描述"输出...相关系数"的字面表述更贴近），
-        如果你想要行业更常见的 Spearman 口径，传 `method="spearman"`
-        即可，两种都实现了。
+        规格书原文只写"计算其历史取值与未来实际收益的信息系数（IC）"，
+        没有指明具体用皮尔逊还是斯皮尔曼——按量化因子研究的行业惯例，
+        "IC"默认指斯皮尔曼秩相关（对异常值更稳健，且不要求指标值与收益率
+        之间是线性关系，只要求单调关系），所以默认值跟行业惯例对齐，选
+        "spearman"。如果确实需要线性相关系数，传 `method="pearson"` 即可，
+        两种都实现了。
     min_sample_size : 判定 `is_reliable` 的样本量门槛，默认 30
         （规格书 6.3 节"低于 30 次"）。
     indicator_name, scenario : 仅用于填充返回结果里的留痕字段，不参与计算。
