@@ -175,51 +175,75 @@ def implied_volatility(
     return float(brentq(objective, sigma_bounds[0], sigma_bounds[1], xtol=1e-8))
 
 
-def iv_skew(strikes: list[float], ivs: list[float], spot: float) -> dict:
-    """IV Skew —— 衡量同一到期日不同行使价隐含波动率的偏斜程度。
+def iv_skew(
+    strikes: list[float],
+    ivs: list[float],
+    spot: float,
+    T: float,
+    r: float = 0.0,
+) -> dict:
+    """IV Skew —— 25-delta 风险逆转（Risk Reversal），规格书 4.6 节口径。
 
-    做法：找到最接近平值（ATM，即最接近 spot 的行使价）的 IV 作为基准，
-    再找到低于 spot 的行使价（近似 OTM Put 方向）中最接近 spot 的一个，
-    计算：
+        skew = IV(25-delta 虚值 Put) − IV(25-delta 虚值 Call)
 
-        skew = IV(OTM Put 方向的行使价) - IV(ATM)
+    这里的"25-delta"不是直接选最接近 spot 的行使价，而是要用 Black-Scholes
+    反推出 **Call Delta 恰好等于 0.25** 对应的执行价位置（这就是 25-delta
+    虚值 Call），以及 **Put Delta 恰好等于 -0.25**（等价于 Call Delta =
+    0.75，因为同参数下 put_delta = call_delta - 1）对应的执行价位置（这就
+    是 25-delta 虚值 Put）。
 
-    skew > 0 通常代表"左偏"（下行保护更贵，市场担忧下跌，常见于股票/
-    股指期权）；skew < 0 代表右偏。
+    做法：
+    1. 用每个行使价自身的 IV，通过 `bs_greeks` 算出该行使价对应的 Call Delta
+       （行使价越高，Call Delta 越低，理论上单调递减）。
+    2. 按 Delta 升序排列后，用线性插值（`numpy.interp`）分别求出
+       Delta=0.25（25-delta Call）与 Delta=0.75（等价于 25-delta Put）处的
+       隐含波动率。
+    3. skew = IV(Delta=0.75，即25d Put) − IV(Delta=0.25，即25d Call)。
+
+    skew > 0 代表市场为下行保护支付的溢价更高（左偏，常见于股票/股指期权）；
+    skew < 0 代表右偏。
 
     Parameters
     ----------
-    strikes : 行使价列表（不要求排序）。
+    strikes : 同一到期日的行使价列表（不要求排序）。
     ivs : 对应行使价的隐含波动率列表。
-    spot : 当前标的价格。
+    spot : 当前标的价格 S。
+    T : 剩余年化到期时间，例如 30 天 = 30/365。
+    r : 无风险利率（年化，小数形式），默认 0。
 
     Returns
     -------
-    dict，包含 atm_strike / atm_iv / otm_put_strike / otm_put_iv / skew。
+    dict，包含 call_25d_iv（25-delta Call 的 IV）、put_25d_iv（25-delta Put
+    的 IV）、skew（两者之差）。
     """
     strikes_arr = np.asarray(strikes, dtype=float)
     ivs_arr = np.asarray(ivs, dtype=float)
-    if len(strikes_arr) == 0:
-        raise ValueError("strikes 不能为空")
+    if len(strikes_arr) < 2:
+        raise ValueError("至少需要 2 个行使价才能定位 25-delta 位置")
 
-    atm_idx = np.argmin(np.abs(strikes_arr - spot))
-    atm_strike, atm_iv = float(strikes_arr[atm_idx]), float(ivs_arr[atm_idx])
+    order = np.argsort(strikes_arr)
+    strikes_sorted = strikes_arr[order]
+    ivs_sorted = ivs_arr[order]
 
-    below_mask = strikes_arr < spot
-    if below_mask.any():
-        below_strikes = strikes_arr[below_mask]
-        below_ivs = ivs_arr[below_mask]
-        otm_idx = np.argmax(below_strikes)  # 最接近 spot 的低行使价
-        otm_put_strike, otm_put_iv = float(below_strikes[otm_idx]), float(below_ivs[otm_idx])
-    else:
-        otm_put_strike, otm_put_iv = atm_strike, atm_iv
+    call_deltas = np.array(
+        [
+            bs_greeks(spot, k, T, r, iv, "call").delta
+            for k, iv in zip(strikes_sorted, ivs_sorted)
+        ]
+    )
+
+    # Call Delta 随行使价升高而单调递减，np.interp 要求 x 升序，故反转。
+    deltas_asc = call_deltas[::-1]
+    ivs_asc = ivs_sorted[::-1]
+
+    call_25d_iv = float(np.interp(0.25, deltas_asc, ivs_asc))
+    # Put Delta = Call Delta - 1，故 Put Delta = -0.25 等价于 Call Delta = 0.75
+    put_25d_iv = float(np.interp(0.75, deltas_asc, ivs_asc))
 
     return {
-        "atm_strike": atm_strike,
-        "atm_iv": atm_iv,
-        "otm_put_strike": otm_put_strike,
-        "otm_put_iv": otm_put_iv,
-        "skew": otm_put_iv - atm_iv,
+        "call_25d_iv": call_25d_iv,
+        "put_25d_iv": put_25d_iv,
+        "skew": put_25d_iv - call_25d_iv,
     }
 
 

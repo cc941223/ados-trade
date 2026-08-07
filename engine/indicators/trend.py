@@ -55,24 +55,39 @@ def atr(df: pd.DataFrame, period: int = 14, method: str = "sma") -> pd.Series:
     raise ValueError("method 必须是 'sma' 或 'wilder'")
 
 
-def relative_strength(asset: pd.Series, benchmark: pd.Series) -> pd.Series:
-    """相对强度比率 RS = 资产价格 / 基准价格（例如个股 vs 大盘指数）。
+def relative_strength_ratio(asset: pd.Series, benchmark: pd.Series) -> pd.Series:
+    """相对强度比率（规格书 4.6 节"简单版"）= 资产价格 / 基准价格。
 
-    RS 上升代表资产跑赢基准，下降代表跑输基准，与两者各自涨跌幅大小无关，
-    只看比值的相对变化趋势。
+    仅为比值本身，未做均线归一化，是 `relative_strength`（Mansfield RS）
+    计算中间步骤所依赖的基础序列。
     """
     if (benchmark == 0).any():
         raise ValueError("benchmark 中不能包含 0，无法计算比率")
     return asset / benchmark
 
 
-def relative_strength_normalized(asset: pd.Series, benchmark: pd.Series, base: float = 100.0) -> pd.Series:
-    """归一化相对强度线：以序列起点为基准，缩放到 `base`（默认 100）。
+def relative_strength(asset: pd.Series, benchmark: pd.Series, period: int = 200) -> pd.Series:
+    """Mansfield RS（规格书 4.6 节"更常用"版本）。
 
-    即 RS_norm_t = (asset_t / benchmark_t) / (asset_0 / benchmark_0) * base，
-    方便跨品种比较趋势斜率，而不用关心起点比值的绝对大小。
+    RS 值 = [(资产价/基准价) ÷ (资产价/基准价的 N 日均线) − 1] × 100
+
+    与单纯的比值（`relative_strength_ratio`）不同，Mansfield RS 用比值自身
+    的 N 日均线做基准，衡量当前比值相对其近期均值的偏离程度：
+    - RS > 0：当前比值高于其 N 日均线，资产正在跑赢基准（RS 线上升）；
+    - RS < 0：当前比值低于其 N 日均线，资产正在跑输基准；
+    - 与两者各自的绝对价格走势无关，只看比值相对自身均线的偏离。
+
+    Parameters
+    ----------
+    asset : 资产价格序列。
+    benchmark : 基准（大盘或板块指数）价格序列，长度、索引需与 asset 对齐。
+    period : 计算比值均线的周期 N，默认 200（可按场景调整，例如日线波段场景
+        常用 200 日，如需更短周期可自行传入，如 50）。
+
+    Returns
+    -------
+    Series，与输入对齐；前 period-1 个位置因均线尚未形成而为 NaN。
     """
-    rs = relative_strength(asset, benchmark)
-    if rs.iloc[0] == 0:
-        raise ValueError("起点相对强度为 0，无法归一化")
-    return rs / rs.iloc[0] * base
+    ratio = relative_strength_ratio(asset, benchmark)
+    ratio_ma = ratio.rolling(window=period, min_periods=period).mean()
+    return (ratio / ratio_ma - 1) * 100
