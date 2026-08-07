@@ -33,17 +33,16 @@ from typing import Optional
 
 import numpy as np
 
+from engine.scoring.leveraged_etf import VALID_TARGET_TYPES
+
 #: 四个评分场景的合法取值，与 `engine.scoring` 下四个模块对应。
 VALID_SCENARIOS = {"intraday", "swing", "options", "leveraged_etf"}
 
-#: 财报事件规则只适用于"跟个股基本面挂钩"的场景。杠杆 ETF 场景（QQQ/TQQQ/
-#: SQQQ 的 Bull/Chop/Bear regime 判断）跟踪的是指数整体，不存在单一个股的
-#: 财报日期，所以不受任何一次财报事件影响。
-#: ⚠️ 这条"财报规则不适用于杠杆ETF场景"的范围划分，规格书原文没有明确写，是
-#: 我根据 7.2 节"财报是评分系统基于历史技术形态失效的最大来源"这句设计依据
-#: 做的推断（杠杆ETF regime 判断本来就不依赖个股技术形态）。请确认这个推断
-#: 是否合理。
-EARNINGS_APPLICABLE_SCENARIOS = {"intraday", "swing", "options"}
+#: 财报事件规则无条件适用的场景——个股相关场景，跟标的类型无关。
+#: leveraged_etf 场景是否适用取决于 target_type（见 apply_event_adjustments
+#: 内部的 `earnings_applicable` 计算），不是固定归类，所以单独列在这里，
+#: 不直接放进这个集合。
+EARNINGS_ALWAYS_APPLICABLE_SCENARIOS = {"intraday", "swing", "options"}
 
 
 @dataclass
@@ -80,7 +79,9 @@ def _trading_days_between(start: date, end: date) -> int:
 def apply_event_adjustments(
     scenario: str,
     current_date: date,
+    target_type: str = "broad_index",
     symbol: Optional[str] = None,
+    underlying_symbol: Optional[str] = None,
     earnings_date: Optional[date] = None,
     earnings_confirmed: bool = True,
     opex_date: Optional[date] = None,
@@ -107,10 +108,32 @@ def apply_event_adjustments(
         "leveraged_etf" 之一（与 `engine.scoring` 四个模块对应）。不同事件
         规则只对特定场景生效，见下面各参数说明。
     current_date : 当前日期（评分发生的日期）。
-    symbol : 标的代码，仅用于填充 `adjustments` 审计记录（对应
-        `event_score_adjustments` 表的 symbol 列），不参与计算逻辑。
+    target_type : 仅在 `scenario="leveraged_etf"` 时有意义，取值
+        "broad_index"（如 TQQQ/SQQQ 跟踪 QQQ）或 "single_stock"（如
+        TSLL/TSLQ 跟踪 TSLA），跟 `engine.scoring.leveraged_etf.score_leveraged_etf`
+        用的是同一个概念、同一组取值（`VALID_TARGET_TYPES`）。按规格书 5.5
+        节 + 7.2 节的适用范围说明：
+        - 财报规则：`target_type="single_stock"` 时适用（按标的个股自身财报
+          日期判断）；`target_type="broad_index"` 时不适用（宽基指数不存在
+          单一财报日）。
+        - 指数再平衡规则：`target_type="broad_index"` 时适用；
+          `target_type="single_stock"` 时不适用（再平衡影响的是指数成分和
+          权重，与单一个股无关）。
+        其余三个场景（intraday/swing/options）不受 `target_type` 影响，
+        传默认值即可。
+    symbol : 杠杆 ETF/标的自身的代码（例如 "TSLL"），仅用于填充 `adjustments`
+        审计记录（对应 `event_score_adjustments` 表的 symbol 列），不参与
+        计算逻辑。
+    underlying_symbol : `scenario="leveraged_etf"` 且 `target_type=
+        "single_stock"` 时，标的所跟踪的个股代码（例如 TSLL 对应 "TSLA"），
+        仅用于丰富审计记录里的说明文字，让"这次财报调整依据的是哪个公司的
+        财报"可追溯（`symbol` 是 ETF 自己的代码，两者含义不同，不要混用）。
+        不提供也不影响计算结果。
     earnings_date, earnings_confirmed : 财报日期与该日期是否为已确认
-        （而非 estimated）状态。
+        （而非 estimated）状态。`scenario="leveraged_etf"` 且
+        `target_type="single_stock"` 时，这里传的应该是标的个股自身的财报
+        日期（例如 TSLL 传 TSLA 的财报日期），不是 ETF 自己的（ETF 本身没有
+        财报）。
     opex_date, is_triple_witching : OpEx 到期日，以及该日期是否为 Triple
         Witching（三重魔力日，每年 3/6/9/12 月的第三个星期五）——是否为三重
         魔力日需调用方自行判断并传入，本模块不做日历计算。
@@ -142,6 +165,16 @@ def apply_event_adjustments(
     """
     if scenario not in VALID_SCENARIOS:
         raise ValueError(f"scenario 必须是 {sorted(VALID_SCENARIOS)} 之一，收到：{scenario!r}")
+    if target_type not in VALID_TARGET_TYPES:
+        raise ValueError(f"target_type 必须是 {sorted(VALID_TARGET_TYPES)} 之一，收到：{target_type!r}")
+
+    # 财报规则的适用范围：intraday/swing/options 无条件适用；leveraged_etf
+    # 场景则要看 target_type——single_stock 才适用（按 5.5/7.2 节）。
+    earnings_applicable = scenario in EARNINGS_ALWAYS_APPLICABLE_SCENARIOS or (
+        scenario == "leveraged_etf" and target_type == "single_stock"
+    )
+    # 指数再平衡规则的适用范围：仅 leveraged_etf 场景且 target_type=broad_index。
+    rebalance_applicable = scenario == "leveraged_etf" and target_type == "broad_index"
 
     multipliers: list[float] = []
     max_pain_weight: Optional[float] = None
@@ -164,10 +197,13 @@ def apply_event_adjustments(
         )
 
     # ------------------------------------------------------------------
-    # 1. 财报日历：仅对个股相关场景生效（不含杠杆 ETF regime 判断）。
+    # 1. 财报日历：适用范围见 earnings_applicable 的计算（intraday/swing/
+    #    options 无条件适用；leveraged_etf 仅 target_type=single_stock 时
+    #    适用，此时 earnings_date 应为标的个股自身的财报日期）。
     # ------------------------------------------------------------------
-    if earnings_date is not None and scenario in EARNINGS_APPLICABLE_SCENARIOS:
+    if earnings_date is not None and earnings_applicable:
         days_until = _trading_days_between(current_date, earnings_date)
+        stock_note = f"（标的个股 {underlying_symbol}）" if scenario == "leveraged_etf" and underlying_symbol else ""
 
         # 财报前 earnings_window_days 个交易日内（不含财报当天——规格书原文
         # 是"前N个交易日"，严格早于财报日）：Confidence × 0.5。
@@ -179,20 +215,15 @@ def apply_event_adjustments(
                 "confidence_multiplier",
                 1.0,
                 earnings_confidence_multiplier,
-                f"距财报 {days_until} 个交易日（窗口 {earnings_window_days} 天）",
+                f"距财报{stock_note} {days_until} 个交易日（窗口 {earnings_window_days} 天）",
             )
 
-        # "日期未确认"标注：规格书原文把这条写成财报日历下的第二个独立要点，
-        # 没有像第一条那样限定具体窗口。
-        # ⚠️ 这里选择只要财报尚未发生（days_until>0）且未确认就标注，不要求
-        # 一定落在 earnings_window_days 窗口内——理由是这条提示服务的场景是
-        # "安排期权到期日"，这件事在财报窗口之外（比如提前一两个月选到期日）
-        # 同样有意义，甚至更需要提前预警。规格书没写窗口限制，我倾向理解成
-        # 有意为之（跟上一条区分开），而不是遗漏。请确认这个理解是否合理，
-        # 如果你认为应该跟上一条共享同一个窗口，告诉我改起来很快。
+        # "日期未确认"标注：规格书 7.2 节原文明确写"不受 3 日窗口限制"，
+        # 所以这里只要财报尚未发生（days_until>0）且未确认就标注，不要求
+        # 落在 earnings_window_days 窗口内。
         if days_until > 0 and not earnings_confirmed:
             labels.append("日期未确认，谨慎安排到期日")
-            _record("earnings", "independent_flag", None, None, "财报日期为 estimated 状态")
+            _record("earnings", "independent_flag", None, None, f"财报日期{stock_note}为 estimated 状态")
 
     # ------------------------------------------------------------------
     # 2. OpEx / Triple Witching：仅对期权场景生效（Max Pain 权重调整）。
@@ -233,9 +264,11 @@ def apply_event_adjustments(
             )
 
     # ------------------------------------------------------------------
-    # 4. 指数再平衡：仅对杠杆 ETF 场景生效。
+    # 4. 指数再平衡：仅 leveraged_etf 场景且 target_type=broad_index 时生效
+    #    （target_type=single_stock 时不适用——再平衡影响的是指数成分和权重，
+    #    与单一个股无关）。
     # ------------------------------------------------------------------
-    if rebalance_date is not None and scenario == "leveraged_etf":
+    if rebalance_date is not None and rebalance_applicable:
         days_until = _trading_days_between(current_date, rebalance_date)
         if 0 <= days_until <= rebalance_window_days:
             multipliers.append(rebalance_confidence_multiplier)

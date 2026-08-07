@@ -78,8 +78,11 @@ def test_earnings_unconfirmed_label_coexists_with_proximity_trigger():
     assert "日期未确认，谨慎安排到期日" in result.labels
 
 
-def test_earnings_not_applicable_to_leveraged_etf_scenario():
-    result = apply_event_adjustments(scenario="leveraged_etf", current_date=TODAY, earnings_date=PLUS[2])
+def test_earnings_not_applicable_to_leveraged_etf_broad_index():
+    # target_type 默认就是 broad_index，这里显式传入是为了测试意图更清楚
+    result = apply_event_adjustments(
+        scenario="leveraged_etf", target_type="broad_index", current_date=TODAY, earnings_date=PLUS[2]
+    )
 
     assert result.confidence_multiplier == 1.0
     assert result.labels == []
@@ -182,8 +185,11 @@ def test_ex_dividend_not_applicable_outside_options_scenario():
 # ---------------------------------------------------------------------------
 
 
-def test_rebalance_within_window_for_leveraged_etf():
-    result = apply_event_adjustments(scenario="leveraged_etf", current_date=TODAY, rebalance_date=PLUS[5])
+def test_rebalance_within_window_for_leveraged_etf_broad_index():
+    # target_type 默认就是 broad_index，这里显式传入是为了测试意图更清楚
+    result = apply_event_adjustments(
+        scenario="leveraged_etf", target_type="broad_index", current_date=TODAY, rebalance_date=PLUS[5]
+    )
     assert result.confidence_multiplier == 0.7
 
 
@@ -249,11 +255,15 @@ def test_earnings_and_macro_same_day_stack_multiplicatively():
     assert len(result.adjustments) == 2
 
 
-def test_leveraged_etf_scenario_only_macro_applies_when_earnings_also_present():
-    # earnings_date 提供了，但 leveraged_etf 场景不适用财报规则，
+def test_leveraged_etf_broad_index_only_macro_applies_when_earnings_also_present():
+    # target_type=broad_index 时不适用财报规则，即便 earnings_date 提供了，
     # 只有宏观事件生效 -> multiplier 应该是单独的 0.6，不是 0.5*0.6
     result = apply_event_adjustments(
-        scenario="leveraged_etf", current_date=TODAY, earnings_date=PLUS[2], macro_event_date=TODAY
+        scenario="leveraged_etf",
+        target_type="broad_index",
+        current_date=TODAY,
+        earnings_date=PLUS[2],
+        macro_event_date=TODAY,
     )
     assert result.confidence_multiplier == 0.6
 
@@ -304,3 +314,113 @@ def test_custom_coefficients_override_defaults():
         earnings_window_days=5,
     )
     assert result.confidence_multiplier == 0.8
+
+
+# ---------------------------------------------------------------------------
+# 8. target_type 区分（规格书 5.5 节"标的类型区分" + 7.2 节适用范围说明）：
+#    财报规则仅 single_stock 适用，再平衡规则仅 broad_index 适用，两者刚好
+#    互斥——下面分别验证这两条规则在两种 target_type 下的开关状态。
+# ---------------------------------------------------------------------------
+
+
+def test_invalid_target_type_raises():
+    with pytest.raises(ValueError):
+        apply_event_adjustments(scenario="leveraged_etf", target_type="not_a_real_type", current_date=TODAY)
+
+
+def test_earnings_applies_to_leveraged_etf_when_single_stock():
+    # target_type=single_stock 时，财报规则按标的个股自身财报日期判断
+    # （例如 TSLL 按 TSLA 的财报日期）
+    result = apply_event_adjustments(
+        scenario="leveraged_etf",
+        target_type="single_stock",
+        current_date=TODAY,
+        earnings_date=PLUS[2],
+        symbol="TSLL",
+        underlying_symbol="TSLA",
+    )
+
+    assert result.confidence_multiplier == 0.5
+    assert "财报临近，历史规律可能失效" in result.labels
+    earnings_adjustment = next(a for a in result.adjustments if a["event_type"] == "earnings")
+    assert earnings_adjustment["symbol"] == "TSLL"  # ETF 自己的代码
+    assert "TSLA" in earnings_adjustment["note"]  # 审计说明里能看出依据的是哪个个股
+
+
+def test_earnings_not_applicable_to_leveraged_etf_when_broad_index_even_if_date_given():
+    # target_type=broad_index 时，即便传了 earnings_date，也不应生效
+    # （宽基指数不存在单一财报日——这条本质上跟
+    # test_earnings_not_applicable_to_leveraged_etf_broad_index 是同一件事，
+    # 这里再从"就算给了日期也不该触发"的角度确认一次）
+    result = apply_event_adjustments(
+        scenario="leveraged_etf", target_type="broad_index", current_date=TODAY, earnings_date=PLUS[1]
+    )
+    assert result.confidence_multiplier == 1.0
+    assert result.labels == []
+
+
+def test_rebalance_applies_to_leveraged_etf_when_broad_index():
+    result = apply_event_adjustments(
+        scenario="leveraged_etf", target_type="broad_index", current_date=TODAY, rebalance_date=PLUS[3]
+    )
+    assert result.confidence_multiplier == 0.7
+
+
+def test_rebalance_not_applicable_to_leveraged_etf_when_single_stock():
+    # target_type=single_stock 时，再平衡规则不适用
+    # （再平衡影响的是指数成分和权重，与单一个股无关）
+    result = apply_event_adjustments(
+        scenario="leveraged_etf", target_type="single_stock", current_date=TODAY, rebalance_date=PLUS[3]
+    )
+    assert result.confidence_multiplier == 1.0
+    assert result.adjustments == []
+
+
+def test_earnings_and_rebalance_are_mutually_exclusive_by_target_type():
+    # 同时提供财报日期与再平衡日期：single_stock 下只有财报规则生效，
+    # broad_index 下只有再平衡规则生效——两条规则在同一个 target_type 下
+    # 永远不会同时触发。
+    single_stock_result = apply_event_adjustments(
+        scenario="leveraged_etf",
+        target_type="single_stock",
+        current_date=TODAY,
+        earnings_date=PLUS[2],
+        rebalance_date=PLUS[3],
+    )
+    broad_index_result = apply_event_adjustments(
+        scenario="leveraged_etf",
+        target_type="broad_index",
+        current_date=TODAY,
+        earnings_date=PLUS[2],
+        rebalance_date=PLUS[3],
+    )
+
+    assert single_stock_result.confidence_multiplier == 0.5  # 只有财报规则生效
+    assert broad_index_result.confidence_multiplier == 0.7  # 只有再平衡规则生效
+    assert {a["event_type"] for a in single_stock_result.adjustments} == {"earnings"}
+    assert {a["event_type"] for a in broad_index_result.adjustments} == {"rebalance"}
+
+
+def test_earnings_single_stock_and_macro_stack_multiplicatively():
+    # target_type=single_stock 时财报规则可以跟宏观事件叠加，
+    # 验证叠加方案对 leveraged_etf/single_stock 组合同样适用
+    result = apply_event_adjustments(
+        scenario="leveraged_etf",
+        target_type="single_stock",
+        current_date=TODAY,
+        earnings_date=PLUS[2],
+        macro_event_date=TODAY,
+    )
+    assert abs(result.confidence_multiplier - 0.3) < 1e-9
+
+
+def test_target_type_irrelevant_for_non_leveraged_etf_scenarios():
+    # target_type 对 intraday/swing/options 三个场景没有任何影响，
+    # 传 single_stock 或 broad_index 结果应该完全一致
+    broad_index_result = apply_event_adjustments(
+        scenario="swing", target_type="broad_index", current_date=TODAY, earnings_date=PLUS[2]
+    )
+    single_stock_result = apply_event_adjustments(
+        scenario="swing", target_type="single_stock", current_date=TODAY, earnings_date=PLUS[2]
+    )
+    assert broad_index_result.confidence_multiplier == single_stock_result.confidence_multiplier == 0.5
