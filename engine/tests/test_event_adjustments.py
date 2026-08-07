@@ -430,11 +430,16 @@ def test_rebalance_applies_to_leveraged_etf_when_broad_index():
 def test_rebalance_not_applicable_to_leveraged_etf_when_single_stock():
     # target_type=single_stock 时，再平衡规则不适用
     # （再平衡影响的是指数成分和权重，与单一个股无关）
+    # 注意：这里没传 earnings_date/underlying_symbol，target_type=single_stock
+    # 会触发配置缺口诊断记录（见下面 "0. 配置缺口检查" 相关测试），
+    # 所以 adjustments 不是空列表，但里面只有 data_gap_warning，没有
+    # rebalance 相关记录，且不影响 confidence_multiplier。
     result = apply_event_adjustments(
         scenario="leveraged_etf", target_type="single_stock", current_date=TODAY, rebalance_date=PLUS[3]
     )
     assert result.confidence_multiplier == 1.0
-    assert result.adjustments == []
+    assert {a["event_type"] for a in result.adjustments} == {"earnings"}
+    assert result.adjustments[0]["adjustment_type"] == "data_gap_warning"
 
 
 def test_earnings_and_rebalance_are_mutually_exclusive_by_target_type():
@@ -485,3 +490,77 @@ def test_target_type_irrelevant_for_non_leveraged_etf_scenarios():
         scenario="swing", target_type="single_stock", current_date=TODAY, earnings_date=PLUS[2]
     )
     assert broad_index_result.confidence_multiplier == single_stock_result.confidence_multiplier == 0.5
+
+
+# ---------------------------------------------------------------------------
+# 9. 配置缺口诊断：target_type=single_stock 但缺少 earnings_date/
+#    underlying_symbol——不报错，但必须在 adjustments 里留痕
+#    （adjustment_type="data_gap_warning"），确保配置遗漏能被事后追溯发现。
+# ---------------------------------------------------------------------------
+
+
+def test_single_stock_missing_both_earnings_date_and_underlying_symbol_records_data_gap():
+    result = apply_event_adjustments(scenario="leveraged_etf", target_type="single_stock", current_date=TODAY)
+
+    assert result.confidence_multiplier == 1.0  # 不影响打分
+    assert result.independent_warnings == []  # 不混进独立警示
+    assert result.labels == []  # 不混进标签
+
+    gap_records = [a for a in result.adjustments if a["adjustment_type"] == "data_gap_warning"]
+    assert len(gap_records) == 1
+    assert gap_records[0]["event_type"] == "earnings"
+    assert "earnings_date" in gap_records[0]["note"]
+    assert "underlying_symbol" in gap_records[0]["note"]
+
+
+def test_single_stock_missing_only_underlying_symbol_records_data_gap():
+    # earnings_date 给了，但没给 underlying_symbol——财报规则正常触发，
+    # 同时仍然应该留一条"缺 underlying_symbol"的诊断记录。
+    result = apply_event_adjustments(
+        scenario="leveraged_etf", target_type="single_stock", current_date=TODAY, earnings_date=PLUS[2]
+    )
+
+    assert result.confidence_multiplier == 0.5  # 财报规则正常生效
+    gap_records = [a for a in result.adjustments if a["adjustment_type"] == "data_gap_warning"]
+    assert len(gap_records) == 1
+    assert "underlying_symbol" in gap_records[0]["note"]
+    assert "earnings_date" not in gap_records[0]["note"]
+
+
+def test_single_stock_missing_only_earnings_date_records_data_gap():
+    # 给了 underlying_symbol 但没给 earnings_date——财报规则不触发，
+    # 但应该留一条"缺 earnings_date"的诊断记录。
+    result = apply_event_adjustments(
+        scenario="leveraged_etf", target_type="single_stock", current_date=TODAY, underlying_symbol="TSLA"
+    )
+
+    assert result.confidence_multiplier == 1.0
+    gap_records = [a for a in result.adjustments if a["adjustment_type"] == "data_gap_warning"]
+    assert len(gap_records) == 1
+    assert "earnings_date" in gap_records[0]["note"]
+    assert "underlying_symbol" not in gap_records[0]["note"]
+
+
+def test_single_stock_with_both_fields_provided_no_data_gap():
+    result = apply_event_adjustments(
+        scenario="leveraged_etf",
+        target_type="single_stock",
+        current_date=TODAY,
+        earnings_date=PLUS[2],
+        underlying_symbol="TSLA",
+    )
+    gap_records = [a for a in result.adjustments if a["adjustment_type"] == "data_gap_warning"]
+    assert gap_records == []
+
+
+def test_data_gap_warning_only_for_leveraged_etf_single_stock():
+    # broad_index 或其它场景下，即使缺失同样的字段（对它们本来就不适用），
+    # 也不应该出现这条诊断——它专门针对 single_stock 的配置矛盾，不是通用的
+    # "缺字段就报"规则。
+    broad_index_result = apply_event_adjustments(
+        scenario="leveraged_etf", target_type="broad_index", current_date=TODAY
+    )
+    swing_result = apply_event_adjustments(scenario="swing", current_date=TODAY)
+
+    assert broad_index_result.adjustments == []
+    assert swing_result.adjustments == []

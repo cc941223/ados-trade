@@ -135,25 +135,20 @@ def apply_event_adjustments(
         日期（例如 TSLL 传 TSLA 的财报日期），不是 ETF 自己的（ETF 本身没有
         财报）。
 
-        ⚠️ 缺失时的处理方式（静默跳过，不报错不警告）：如果
-        `target_type="single_stock"` 但没有传 `earnings_date`（比如数据管道
-        还没接上标的个股的财报日历），财报规则（包括这次新加的独立警示）
-        整条都不会触发，函数不会报错、不会抛 Python warning，`adjustments`
-        审计列表里也不会留下"本该有财报数据但缺失"的痕迹——处理方式跟本模块
-        其它所有可选输入完全一致（`opex_date=None` 就不判 OpEx，
-        `ex_dividend_date=None` 就不判除息，都是"缺失=当作不适用"，不是
-        "缺失=报错"）。取舍在于：保持这种一致性，能让调用方在还没接好某类
-        日历数据时依然可以正常调用本函数（比如先把宏观事件规则用起来，财报
-        日历慢慢补），不会被要求"每个事件类型必须提供才能调用"；代价是
-        `target_type="single_stock"` 但忘记接标的个股财报日历这种数据管道
-        缺口，不会在这一层被发现，只能在更上层（比如数据完整度检查）或人工
-        排查时暴露。这是我的选择，不是规格书要求，如果你更倾向"这种情况下
-        应该报错或至少留一条诊断记录"，告诉我，改起来不复杂（比如在
-        `adjustments` 里加一条 `adjustment_type="data_gap"` 的记录，不影响
-        `confidence_multiplier`/`independent_warnings`，只做留痕）。
-    underlying_symbol 缺失时同理：不报错，只是审计记录里少一段"标的个股是
-        谁"的说明文字，不影响任何计算结果，因为它本来就只是为了留痕可读性，
-        不是财报规则触发与否的判断依据。
+        ⚠️ 缺失时的处理方式——不报错，但会留下诊断记录：
+        `earnings_date`/`underlying_symbol` 跟 `opex_date` 之类的"通用可选
+        字段"性质不一样——它们只在 `target_type="single_stock"` 时才有意义，
+        这时候缺失不是"数据暂缺"（不像 `opex_date=None` 那样，任何场景下
+        单纯就是没有这个事件），而是**配置矛盾**：调用方选择了
+        `target_type="single_stock"`（声明"这是跟踪单一个股的杠杆
+        ETF"），却没告诉系统跟踪哪只股票，或没接上那只股票的财报日历。
+        因此处理方式跟其它可选字段不同：只要 `target_type="single_stock"`
+        且 `earnings_date` 或 `underlying_symbol` 缺失任意一个，就会在
+        `adjustments` 里追加一条 `adjustment_type="data_gap_warning"` 的
+        记录（`event_type="earnings"`，note 写明具体缺了什么），不抛异常、
+        不影响 `confidence_multiplier`/`independent_warnings`（避免这一处
+        的配置缺口卡死整条打分流程），但确保这类配置遗漏能在事后审计时被
+        发现，而不是彻底沉默。
     opex_date, is_triple_witching : OpEx 到期日，以及该日期是否为 Triple
         Witching（三重魔力日，每年 3/6/9/12 月的第三个星期五）——是否为三重
         魔力日需调用方自行判断并传入，本模块不做日历计算。
@@ -215,6 +210,32 @@ def apply_event_adjustments(
                 "note": note,
             }
         )
+
+    # ------------------------------------------------------------------
+    # 0. 配置缺口检查：target_type=single_stock 但缺少标的个股财报信息。
+    #
+    # underlying_symbol/earnings_date 跟 opex_date 之类的"通用可选字段"性质
+    # 不一样——它们只在 target_type=single_stock 时才有意义，这时候缺失不是
+    # "数据暂缺"，是配置矛盾（选了 single_stock 却没告诉系统跟踪哪只股票，
+    # 或没接上那只股票的财报日历）。不做硬性报错（避免调用方还没接好某个
+    # 具体标的的财报数据时，整条数据管道被这一处卡死），但必须在
+    # `adjustments` 审计记录里留一条明确的诊断条目，确保这类配置遗漏能被
+    # 事后追溯发现，不是彻底沉默。
+    # ------------------------------------------------------------------
+    if scenario == "leveraged_etf" and target_type == "single_stock":
+        missing_fields = []
+        if earnings_date is None:
+            missing_fields.append("标的个股财报日期(earnings_date)")
+        if underlying_symbol is None:
+            missing_fields.append("标的个股代码(underlying_symbol)")
+        if missing_fields:
+            _record(
+                "earnings",
+                "data_gap_warning",
+                None,
+                None,
+                f"target_type=single_stock 但缺少{'、'.join(missing_fields)}，财报规则未生效",
+            )
 
     # ------------------------------------------------------------------
     # 1. 财报日历：适用范围见 earnings_applicable 的计算（intraday/swing/
