@@ -83,6 +83,74 @@ def atr(df: pd.DataFrame, period: int = 14, method: str = "sma") -> pd.Series:
     raise ValueError("method 必须是 'sma' 或 'wilder'")
 
 
+def rsi(df: pd.DataFrame, period: int = 14, method: str = "wilder") -> pd.Series:
+    """相对强弱指标 RSI（Relative Strength Index）。
+
+    RSI = 100 × 平均涨幅 / (平均涨幅 + 平均跌幅)，等价于教科书写法
+    `100 - 100/(1+RS)`（RS = 平均涨幅/平均跌幅），这里直接用等价的除法
+    形式实现，好处是分母 `平均涨幅+平均跌幅` 为 0（窗口内价格完全没变化）
+    时不会除以 0 后再除以 0 两次出问题，只需要处理一次分母为 0 的情况。
+
+    这是规格书第 13.3 节记录的已知代码缺口：此前 `engine.indicators` 里
+    从未实现 RSI，`score_intraday` 的 RSI 子指标（5.2 节权重 20%）只能靠
+    编排层把 `rsi` 当作外部传入的可选参数，缺失时不参与打分。这个函数
+    补上后，`engine/pipeline/intraday.py` 会在调用方没有显式传 `rsi` 时
+    自动用它从原始 OHLCV 算出来。
+
+    Parameters
+    ----------
+    df : 需包含 `close` 列。
+    period : 平滑周期，默认 14（RSI 最经典、最常用的默认周期）。
+    method : "wilder"（默认）或 "sma"。
+
+        - "wilder"：Wilder 本人提出 RSI 时用的原始平滑方法，也是业内最
+          常见的默认实现——平均涨幅/跌幅按跟 `atr(method="wilder")` 完全
+          相同的递推公式平滑（`avg_t = (avg_{t-1}×(period-1) + x_t) /
+          period`），首个值用前 `period` 个涨跌幅的简单平均初始化。
+        - "sma"：平均涨幅/跌幅都用简单滑动平均（`rolling().mean()`），
+          跟 `atr(method="sma")` 是同一种平滑方式，只是应用在涨跌幅上
+          而不是真实波幅上。
+
+        两种方法在第一个有效值上完全一致（都是"前 period 个涨跌幅的简单
+        平均"），从第二个有效值开始才会分化——Wilder 平滑对历史值的权重
+        衰减更慢（更平滑），简单滑动平均只看窗口内的值（对新数据更敏感）。
+
+    Returns
+    -------
+    Series，与 `df` 索引对齐，取值范围 [0,100]；窗口不足 `period+1` 根
+    K 线（计算涨跌幅需要用到前一根收盘价，所以比 `atr` 多需要 1 根）的
+    位置为 NaN。窗口内价格完全没有变化（平均涨幅和平均跌幅都是 0，
+    0/0 无定义）时，约定 RSI=50（中性，无涨跌可言，不是"没数据"，所以
+    不是 NaN）。
+    """
+    if method not in ("sma", "wilder"):
+        raise ValueError("method 必须是 'sma' 或 'wilder'")
+
+    close = df["close"]
+    delta = close.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+
+    if method == "sma":
+        avg_gain = gain.rolling(window=period, min_periods=period).mean()
+        avg_loss = loss.rolling(window=period, min_periods=period).mean()
+    else:  # wilder
+        avg_gain = pd.Series(index=close.index, dtype=float)
+        avg_loss = pd.Series(index=close.index, dtype=float)
+        if len(close) >= period + 1:
+            avg_gain.iloc[period] = gain.iloc[1 : period + 1].mean()
+            avg_loss.iloc[period] = loss.iloc[1 : period + 1].mean()
+            for i in range(period + 1, len(close)):
+                avg_gain.iloc[i] = (avg_gain.iloc[i - 1] * (period - 1) + gain.iloc[i]) / period
+                avg_loss.iloc[i] = (avg_loss.iloc[i - 1] * (period - 1) + loss.iloc[i]) / period
+
+    denom = avg_gain + avg_loss
+    with np.errstate(divide="ignore", invalid="ignore"):
+        result = 100 * avg_gain / denom
+    result[denom == 0] = 50.0
+    return result
+
+
 def relative_strength_ratio(asset: pd.Series, benchmark: pd.Series) -> pd.Series:
     """相对强度比率（规格书 4.6 节"简单版"）= 资产价格 / 基准价格。
 

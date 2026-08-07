@@ -3,6 +3,7 @@ OHLCV 到最终 Bull/Bear/Confidence Score 整条链路能跑通、字段对得�
 """
 from datetime import date
 
+from engine.indicators.trend import rsi as compute_rsi
 from engine.pipeline import run_intraday_pipeline
 from engine.pipeline.base import PipelineResult
 
@@ -40,15 +41,31 @@ def test_intraday_pipeline_runs_end_to_end_and_fields_line_up():
     assert result.independent_warnings == []
 
 
-def test_intraday_pipeline_missing_rsi_is_gap_not_error():
-    # RSI 尚未在 engine.indicators 实现，不传时应该被 score_intraday 当作
-    # 缺失子指标处理，而不是报错。
+def test_intraday_pipeline_auto_computes_rsi_when_not_passed():
+    # 不传 rsi 时，编排层应该自动用 engine.indicators.trend.rsi() 从原始
+    # ohlcv 算出来，而不再是"缺失子指标"——60 根分钟线远超默认
+    # rsi_period=14 所需的 period+1=15 根，应该有确定的非 None 值。
     ohlcv = make_intraday_ohlcv(n=60)
+    result = run_intraday_pipeline(symbol="AAPL", current_date=date(2026, 8, 5), ohlcv=ohlcv)
+
+    expected_rsi = float(compute_rsi(ohlcv, period=14).iloc[-1])
+    assert result.sub_scores["rsi"].raw_value == expected_rsi
+    assert result.sub_scores["rsi"].score is not None
+    # score 精确等于 score_intraday 内部公式：100 - 2*rsi
+    assert abs(result.sub_scores["rsi"].score - (100 - 2 * expected_rsi)) < 1e-9
+    # 其它子指标不受影响
+    assert result.sub_scores["price_vs_vwap"].score is not None
+
+
+def test_intraday_pipeline_missing_rsi_is_gap_when_history_insufficient():
+    # 窗口不够 rsi_period+1 根 K 线时，自动计算结果是 NaN，转成 None——
+    # 该子指标视为缺失，而不是报错。
+    ohlcv = make_intraday_ohlcv(n=3)  # 远小于默认 rsi_period=14 所需的 15 根
     result = run_intraday_pipeline(symbol="AAPL", current_date=date(2026, 8, 5), ohlcv=ohlcv)
 
     assert result.sub_scores["rsi"].score is None
     assert result.sub_scores["rsi"].raw_value is None
-    # 其它子指标不受影响，完整度应该小于 1（5 个里缺 1 个）
+    # 其它子指标不受影响
     assert result.sub_scores["price_vs_vwap"].score is not None
 
 

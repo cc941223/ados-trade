@@ -9,14 +9,12 @@
         --(engine.events.adjustments.apply_event_adjustments)--> EventAdjustment
         --(engine.pipeline.base.combine_with_event_adjustment)--> PipelineResult
 
-⚠️ 已知缺口：RSI。`score_intraday` 需要一个 0~100 的 RSI 值，但
-`engine.indicators` 里目前没有任何函数计算 RSI——不是疏漏，是刻意没做：
-RSI 有实质性的公式选择（Wilder 原始平滑 vs 简单移动平均的 gain/loss），
-属于需要专门实现、写测试、跟规格书核对的指标计算，不是编排层可以顺手写一行
-搞定的东西（这正是这一层"不应该引入新指标计算"的边界）。所以这里把 `rsi`
-做成一个直接传入的参数——不提供时（默认 `None`）对应子指标在 `score_intraday`
-里会被判定为缺失，正常参与完整度计算但不参与打分，不会报错。等
-`engine.indicators.trend` 补上 RSI 之后，再把这里换成调用它。
+RSI（规格书第 13.3 节此前记录的已知代码缺口，现已补上）：
+`engine.indicators.trend.rsi` 实现后，这里默认会用它从原始 `ohlcv` 的
+`close` 列自动算出 RSI。`rsi` 参数保留为可选的手动覆盖入口——调用方
+显式传入时优先使用传入的值（不会被自动计算覆盖），不传（默认 `None`）
+时才会自动计算；自动计算结果窗口不足（`ohlcv` 根数小于 `rsi_period+1`）
+时为 NaN，转成 `None`，该子指标视为缺失，不会报错。
 """
 from __future__ import annotations
 
@@ -27,7 +25,7 @@ import pandas as pd
 
 from engine.events.adjustments import apply_event_adjustments
 from engine.indicators.base import vwap
-from engine.indicators.trend import atr, sma
+from engine.indicators.trend import atr, rsi as compute_rsi, sma
 from engine.scoring.intraday import score_intraday
 
 from .base import PipelineResult, combine_with_event_adjustment, none_if_nan
@@ -38,6 +36,7 @@ def run_intraday_pipeline(
     current_date: date,
     ohlcv: pd.DataFrame,
     rsi: Optional[float] = None,
+    rsi_period: int = 14,
     short_ma_period: int = 5,
     long_ma_period: int = 20,
     atr_period: int = 14,
@@ -63,8 +62,12 @@ def run_intraday_pipeline(
         因为窗口不足而缺失（`sma`/`atr` 在窗口不足时返回 NaN，本函数会转成
         `None`，不会报错，只是这几个子指标不参与打分）——如果要让这几个
         子指标正常工作，`ohlcv` 需要包含足够多个交易日的收盘价历史。
-    rsi : 见模块文档"已知缺口"——RSI 尚未在 engine.indicators 实现，这里是
-        直接传入的外部值，不提供则该子指标视为缺失。
+    rsi : 手动覆盖用——不传（默认 `None`）时，本函数会用
+        `engine.indicators.trend.rsi(ohlcv, period=rsi_period)` 从 `ohlcv`
+        的 `close` 列自动算出（取最后一根的值）；显式传入时以传入值为准，
+        不会被自动计算覆盖。
+    rsi_period : 自动计算 RSI 时的平滑周期，默认 14（`rsi()` 的默认值）。
+        显式传入 `rsi` 时此参数不生效。
     short_ma_period, long_ma_period : 均线排列子指标用的短/长周期，默认
         5 日 / 20 日。
     atr_period : ATR 计算周期，默认 14（`engine.indicators.trend.atr` 的默认值）。
@@ -102,6 +105,11 @@ def run_intraday_pipeline(
     # 当日涨跌幅：判断"放量"该加强哪个方向要用到，纯粹的 pct_change，不是
     # 指标计算。
     price_change_pct = none_if_nan(float(ohlcv["close"].pct_change().iloc[-1]))
+
+    # 调用方没有显式传 rsi 时，自动从原始 OHLCV 算出来；传了就用传入的值
+    # （手动覆盖优先，不会被自动计算结果覆盖）。
+    if rsi is None:
+        rsi = none_if_nan(float(compute_rsi(ohlcv, period=rsi_period).iloc[-1]))
 
     # ---- 2. 组装参数，调用 score_intraday ----
     score_result = score_intraday(
