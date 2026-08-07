@@ -113,3 +113,56 @@ def test_rsi_invalid_method_raises():
     df = _make_df(CLOSES)
     with pytest.raises(ValueError):
         rsi(df, period=5, method="ema")
+
+
+def test_rsi_wilder_matches_independent_closed_form_deep_into_recursion():
+    """前面几个手算测试只有 8 根 K 线（period=5），最多验证了种子值
+    （index=5）之后 2 步递推（index=6、7）——如果 Wilder 递推循环本身
+    有 bug（比如引用错了上一步的值、denominator 用错、循环边界差一位），
+    只要不影响前 2 步就测不出来。这里用一条完全不同的计算路径——把
+    Wilder 递推 `avg_t = avg_{t-1}*(period-1)/period + x_t/period` 展开
+    成等比权重求和的封闭形式：
+
+        avg_i = seed * w^(i-period) + Σ_{k=period+1}^{i} x_k/period * w^(i-k)
+        （w = (period-1)/period）
+
+    而不是逐步循环，在一条 30 根 K 线、period=5（种子之后有 25 步真正
+    递归）的序列上独立算出 avg_gain/avg_loss，再跟 rsi() 的输出逐点核对，
+    专门验证进入真正递归阶段之后数值没有漂移。
+    """
+    period = 5
+    deltas = [
+        2, -3, 5, 2, -3, 5, 3, -1, 4, -2, 6, -4, 1, 3, -5,
+        2, 2, -1, 4, -3, 5, -2, 3, 1, -4, 6, -3, 2, -1,
+    ]
+    closes = [100.0]
+    for d in deltas:
+        closes.append(closes[-1] + d)
+    df = _make_df(closes)
+
+    result = rsi(df, period=period, method="wilder")
+
+    close = pd.Series(closes)
+    delta = close.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+
+    def _weighted_sum_reference(x):
+        w = (period - 1) / period
+        seed = x.iloc[1 : period + 1].mean()
+        avg = [float("nan")] * len(x)
+        avg[period] = seed
+        for i in range(period + 1, len(x)):
+            total = seed * (w ** (i - period))
+            for k in range(period + 1, i + 1):
+                total += x.iloc[k] / period * (w ** (i - k))
+            avg[i] = total
+        return avg
+
+    ref_gain = _weighted_sum_reference(gain)
+    ref_loss = _weighted_sum_reference(loss)
+
+    for i in range(period, len(closes)):
+        denom = ref_gain[i] + ref_loss[i]
+        expected = 50.0 if denom == 0 else 100 * ref_gain[i] / denom
+        assert abs(result.iloc[i] - expected) < 1e-9, f"index {i} 不一致"
