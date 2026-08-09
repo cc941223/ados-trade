@@ -1,142 +1,173 @@
-"""IBKR Client Portal Web API（CPAPI）客户端接口层。
+"""IBKR 真实数据读取实现：ib_insync + IB Gateway（Docker，TWS API 协议）。
 
-`IBKRClient` 只定义方法签名，真实实现（直连 IBeam 网关后调用 CPAPI）目前
-全部 `raise NotImplementedError`——README 里写的很清楚，这个仓库还在
-"M0 基础设施与可行性验证"阶段，Gateway 认证自动化（IBeam + Auto-Restart）
-和直连 CPAPI 复测都还没做完，真的把网络请求代码写在这里、此刻却验证不了，
-反而容易埋下"看起来实现了但从没跑通过"的假象。等 IBeam 部署好、能实际
-发请求验证字段名之后，再把 `NotImplementedError` 换成真实的 HTTP 调用。
+M0 阶段的连接方式从"IBeam + Client Portal Web API（CPAPI，HTTPS）"换成了
+"ib_insync + IB Gateway Docker（TWS API，socket 协议，端口 4002）"——旧的
+IBeam/CPAPI 实现完整保留在 `brokers/ibkr/legacy_ibeam/`，仅供回退参考，
+不再是默认路径。`docker-compose.yml` 现在启动的是 `ibgateway` 服务
+（`ghcr.io/gnzsnz/ib-gateway`），对外暴露 4002（TWS API）和 5900（VNC，
+首次登录/2FA 需要通过 VNC 桌面手动确认）。
 
-⚠️ 已通过 IBKR MCP 连接器/官方文档验证过的 CPAPI 字段，目前只有 Delta
-(7308)/Gamma(7309)/Theta(7310)/Vega(7311) 这四个（见规格书第 12 章）。
-Last/Bid/Ask/Volume/Open Interest 等其它字段的具体 field code，需要直连
-CPAPI 之后对照官方文档核实，本文件里的方法只按"语义"命名（`last`/
-`bid`/`ask`/...），不在注释里编造具体 field code 数字，避免以后被当成
-"已验证事实"误用。
+`IBInsyncClient` 目前只实现了 `get_stock_ohlcv` 一个方法——先把这一个方法
+跑通、确认连通性没问题，剩下三个方法（`get_option_chain`/
+`get_option_snapshot`/`get_iv_percentile`）留着 `NotImplementedError`，
+等 `get_stock_ohlcv` 验证过再逐个补上，不是遗漏。
 
-⚠️ 结构重构说明（本次从 `data/collectors/ibkr_client.py` 原样搬过来）：
+⚠️ `get_stock_ohlcv` 里以下几处是本次"先跑通"阶段的占位设计，不是
+已经验证过的最终方案，后续实现其它方法或者接入真实调度时应该重新核对：
 
-- 这个文件原来同时定义 `IBKRClient` 和 `MockIBKRClient`；`MockIBKRClient`
-  现在搬到了 `brokers/mock/client.py`（对应 `brokers/mock/` 独立目录），
-  这里只保留 `IBKRClient`。
-- 新增了 `IBKRClient` 对 `brokers.base.BrokerClient` 统一接口的实现
-  （`get_stock_ohlcv`/`get_option_chain`/`get_option_snapshot`/
-  `get_iv_percentile` 四个方法），内部直接委托给 `collector.py` 里原有
-  的 `collect_*` 解析函数，解析逻辑本身逐行未变。
-- 原来两个返回"CPAPI 原始格式"的方法改了名字，加了下划线前缀：
-  `get_option_chain` -> `_get_option_chain_raw`，
-  `get_iv_percentile` -> `_get_iv_percentile_raw`。
-  这是因为 `BrokerClient` 接口里也有同名的 `get_option_chain`/
-  `get_iv_percentile`，但那两个方法返回的是 `data/schema.sql` 表结构的行
-  （schema 形状），跟这里"CPAPI 原始返回格式"（`conid`/`strike`/`right`
-  这种字段名）完全不是一回事，一个类不能用同一个名字挂两个不同签名/
-  语义的方法，所以把原始格式的那两个改成私有命名腾出位置。
-  `get_price_history`/`get_option_market_data` 这两个原始方法名跟接口
-  没有冲突，维持原名不变。全文搜索确认过，除了这个文件和
-  `collector.py` 内部，没有任何其它代码直接按名字调用这四个原始方法，
-  改名不影响任何已有测试。
+- 合约类型硬编码成 `Stock(symbol, "SMART", "USD")`（美股 + SMART 路由 +
+  美元结算）。规格书当前场景全部是美股，暂时够用，但如果以后要支持其它
+  市场/币种，这里需要参数化。
+- `whatToShow="TRADES"`、`useRTH=True`（只要常规交易时段）是 IB
+  历史数据接口里最常见的默认组合，没有找到规格书对这两个参数的具体要求，
+  先按最常见用法写，欢迎确认。
+- `start`/`end` 参数目前只接受 `"YYYY-MM-DD"` 格式的日期字符串，内部转换
+  成 IB 历史数据接口需要的 `durationStr`（"N D"）+ `endDateTime`。两者都
+  不传时默认拉最近 30 天（`_DEFAULT_DURATION_DAYS`），这个默认值是没有
+  在规格书或任务里明确要求的占位选择，不代表这是"正确"的默认回溯窗口。
+- 没有做重试/断线重连——`ib_insync` 断线后 `reqHistoricalData` 会直接
+  抛异常，调用方目前需要自己处理。
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from typing import Optional
 
+from ib_insync import IB, Stock
+
 from ..base import BrokerClient
-from .collector import (
-    _parse_option_contract,
-    _parse_option_snapshot,
-    collect_iv_percentile,
-    collect_stock_ohlcv,
-)
+
+# stock_ohlcv.timeframe 的取值约定（跟 schema.sql 注释一致）到 ib_insync
+# `reqHistoricalData(barSizeSetting=...)` 需要的字符串之间的映射。
+_TIMEFRAME_TO_BAR_SIZE = {
+    "1min": "1 min",
+    "5min": "5 mins",
+    "15min": "15 mins",
+    "30min": "30 mins",
+    "1h": "1 hour",
+    "1day": "1 day",
+    "1d": "1 day",
+}
+
+# ⚠️ 占位默认值：start/end 都不传时的默认回溯天数，未在规格书里明确要求。
+_DEFAULT_DURATION_DAYS = 30
 
 
-class IBKRClient(BrokerClient):
-    """CPAPI 客户端接口，真实实现留空。
+class IBInsyncClient(BrokerClient):
+    """通过 ib_insync 连接 IB Gateway（TWS API，默认 4002 端口）读取行情。
 
-    方法签名先按"采集函数需要什么"设计好，等直连 Gateway 之后再逐个实现。
+    Parameters
+    ----------
+    host : IB Gateway 地址，默认 "127.0.0.1"（docker-compose 把 4002 映射
+        到宿主机同名端口，本机直连即可；如果调用方本身也跑在同一个
+        docker network 里，可以传服务名 "ibgateway"）。
+    port : TWS API 端口，默认 4002（`docker-compose.yml` 里 `ibgateway`
+        服务映射的端口；4002 是 IB Gateway 的 paper 账户默认端口，实盘
+        账户默认是 4001——本项目 M0 阶段固定连 paper，见
+        `docker-compose.yml` 里 `TRADING_MODE: paper`）。
+    client_id : TWS API 允许同一个 Gateway 被多个客户端同时连接，用
+        `client_id` 区分，默认 1。如果同时跑多个连接（例如这个客户端
+        再加一个手动检查脚本），必须用不同的 `client_id`，否则后连的会
+        把先连的踢掉。
+    timeout : 连接超时秒数，默认 10。
     """
 
-    # ------------------------------------------------------------------
-    # CPAPI 原始格式方法（真实实现待补，目前全部 raise NotImplementedError）
-    # ------------------------------------------------------------------
+    def __init__(
+        self,
+        host: str = "127.0.0.1",
+        port: int = 4002,
+        client_id: int = 1,
+        timeout: float = 10.0,
+    ) -> None:
+        self._host = host
+        self._port = port
+        self._client_id = client_id
+        self._timeout = timeout
+        self._ib: Optional[IB] = None
 
-    def get_price_history(
-        self, symbol: str, timeframe: str, start: Optional[str] = None, end: Optional[str] = None
+    def connect(self) -> None:
+        """建立到 IB Gateway 的连接（幂等，已连接时不会重复连接）。"""
+        if self._ib is not None and self._ib.isConnected():
+            return
+        self._ib = IB()
+        self._ib.connect(self._host, self._port, clientId=self._client_id, timeout=self._timeout)
+
+    def disconnect(self) -> None:
+        if self._ib is not None and self._ib.isConnected():
+            self._ib.disconnect()
+
+    def get_stock_ohlcv(
+        self,
+        symbol: str,
+        timeframe: str,
+        start: Optional[str] = None,
+        end: Optional[str] = None,
     ) -> list[dict]:
-        """正股 OHLCV 历史数据，对应 CPAPI `/iserver/marketdata/history`
-        （或历史数据用 `/hmds/history`，具体用哪个待直连后确认）。
+        """正股 OHLCV 历史数据，对应 `stock_ohlcv` 表。
 
         Parameters
         ----------
-        symbol : 标的代码。
-        timeframe : K 线周期，例如 "1min"/"5min"/"1day"，跟
-            `stock_ohlcv.timeframe` 列的取值约定一致。
-        start, end : 时间范围（可选，具体格式待接入时按 CPAPI 实际要求调整）。
+        symbol : 标的代码（例如 "AAPL"）。
+        timeframe : K 线周期，取值见 `_TIMEFRAME_TO_BAR_SIZE`。
+        start, end : 可选，`"YYYY-MM-DD"` 格式；都不传则拉最近
+            `_DEFAULT_DURATION_DAYS` 天到现在。
 
         Returns
         -------
-        list[dict]，每个 dict 是一根 K 线的原始返回（真实字段名待验证），
-        由 `collector._parse_ohlcv_bar` 解析成 `stock_ohlcv` 表的行。
+        list[dict]，每个 dict 的 key 是 `stock_ohlcv` 的列名：
+        symbol/ts/timeframe/open/high/low/close/volume。
         """
-        raise NotImplementedError("直连 CPAPI 的实现待 IBeam 网关搭好后补上")
+        bar_size = _TIMEFRAME_TO_BAR_SIZE.get(timeframe)
+        if bar_size is None:
+            raise ValueError(
+                f"不支持的 timeframe: {timeframe!r}，目前支持 {sorted(_TIMEFRAME_TO_BAR_SIZE)}"
+            )
 
-    def _get_option_chain_raw(self, underlying: str, expiration_date: date) -> list[dict]:
-        """某个到期日的期权链结构（行使价 + 合约 ID），对应 CPAPI
-        `/iserver/secdef/strikes` + `/iserver/secdef/info` 两步调用组合
-        （先拿行使价列表，再逐个行使价查 conid）。
+        self.connect()
 
-        Returns
-        -------
-        list[dict]，每个 dict 至少含合约 ID、行使价、Call/Put 标记（真实
-        字段名待验证），由 `collector._parse_option_contract` 解析成
-        `option_contracts` 表的行。
-        """
-        raise NotImplementedError("直连 CPAPI 的实现待 IBeam 网关搭好后补上")
+        start_dt = datetime.strptime(start, "%Y-%m-%d") if start else None
+        end_dt = datetime.strptime(end, "%Y-%m-%d") if end else None
+        duration_str = self._duration_str(start_dt, end_dt)
+        end_datetime = end_dt.strftime("%Y%m%d %H:%M:%S") if end_dt else ""
 
-    def get_option_market_data(self, contract_ids: list[int]) -> list[dict]:
-        """一批期权合约的行情快照（含 IV/Greeks），对应 CPAPI
-        `/iserver/marketdata/snapshot`。
+        contract = Stock(symbol, "SMART", "USD")
+        self._ib.qualifyContracts(contract)
+        bars = self._ib.reqHistoricalData(
+            contract,
+            endDateTime=end_datetime,
+            durationStr=duration_str,
+            barSizeSetting=bar_size,
+            whatToShow="TRADES",
+            useRTH=True,
+        )
 
-        Returns
-        -------
-        list[dict]，每个 dict 对应一个合约的快照（真实字段名待验证，
-        Delta/Gamma/Theta/Vega 已确认是 field code 7308-7311），由
-        `collector._parse_option_snapshot` 解析成 `option_snapshot`
-        表的行。
-        """
-        raise NotImplementedError("直连 CPAPI 的实现待 IBeam 网关搭好后补上")
+        return [
+            {
+                "symbol": symbol,
+                "ts": bar.date if isinstance(bar.date, datetime) else datetime.combine(bar.date, datetime.min.time()),
+                "timeframe": timeframe,
+                "open": bar.open,
+                "high": bar.high,
+                "low": bar.low,
+                "close": bar.close,
+                "volume": bar.volume,
+            }
+            for bar in bars
+        ]
 
-    def _get_iv_percentile_raw(self, symbol: str) -> dict:
-        """IV 百分位（13/26/52 周），对应 CPAPI 现成字段
-        `implied_volatility_percentile`（规格书 3.1 节已确认存在，具体
-        怎么区分 13/26/52 周三个周期待直连后确认）。
-
-        Returns
-        -------
-        dict，含三个周期的百分位数值，由
-        `collector._parse_iv_percentile` 解析成 `iv_percentile`
-        表的三行（每个周期一行）。
-        """
-        raise NotImplementedError("直连 CPAPI 的实现待 IBeam 网关搭好后补上")
-
-    # ------------------------------------------------------------------
-    # brokers.base.BrokerClient 统一接口实现——委托给 collector.py 里的
-    # collect_* 解析函数，本身不包含任何新的解析逻辑。
-    # ------------------------------------------------------------------
-
-    def get_stock_ohlcv(
-        self, symbol: str, timeframe: str, start: Optional[str] = None, end: Optional[str] = None
-    ) -> list[dict]:
-        return collect_stock_ohlcv(self, symbol, timeframe, start, end)
+    @staticmethod
+    def _duration_str(start_dt: Optional[datetime], end_dt: Optional[datetime]) -> str:
+        if start_dt is None:
+            return f"{_DEFAULT_DURATION_DAYS} D"
+        reference_end = end_dt or datetime.utcnow()
+        days = max(1, (reference_end - start_dt).days)
+        return f"{days} D"
 
     def get_option_chain(self, underlying: str, expiration_date: date) -> list[dict]:
-        raw_contracts = self._get_option_chain_raw(underlying, expiration_date)
-        return [_parse_option_contract(underlying, expiration_date, c) for c in raw_contracts]
+        raise NotImplementedError("get_stock_ohlcv 先跑通，其它方法等确认连通性后再补")
 
     def get_option_snapshot(self, contract_ids: list[int]) -> list[dict]:
-        raw_snapshots = self.get_option_market_data(contract_ids)
-        snapshot_ts = datetime.now(timezone.utc)
-        return [_parse_option_snapshot(s, snapshot_ts) for s in raw_snapshots]
+        raise NotImplementedError("get_stock_ohlcv 先跑通，其它方法等确认连通性后再补")
 
     def get_iv_percentile(self, symbol: str, ts: Optional[datetime] = None) -> list[dict]:
-        return collect_iv_percentile(self, symbol, ts)
+        raise NotImplementedError("get_stock_ohlcv 先跑通，其它方法等确认连通性后再补")

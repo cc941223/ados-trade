@@ -1,14 +1,21 @@
-"""brokers/ibkr/collector.py 单元测试 —— 用 MockIBKRClient 构造假数据，
-验证解析结果跟 schema.sql 字段对得上，覆盖正常情况和缺字段的情况。
+"""brokers/ibkr/legacy_ibeam/collector.py 单元测试 —— 用 MockIBKRClient
+构造假数据，验证解析结果跟 schema.sql 字段对得上，覆盖正常情况和缺字段
+的情况。
 
-⚠️ 结构重构说明：这个文件是从 `data/collectors/tests/test_ibkr_collector.py`
-原样搬过来的，惟一改动是 import 路径（`data.collectors.ibkr_client`/
-`data.collectors.ibkr_collector` -> `brokers.mock`/`brokers.ibkr.collector`），
-断言内容逐条未变。
+⚠️ 结构重构说明：这个文件最初是 `data/collectors/tests/test_ibkr_collector.py`，
+后来搬到 `brokers/tests/test_ibkr_collector.py`，现在 IBKR 连接方案从
+IBeam 换成 ib_insync 之后，它测试的 `collector.py`（CPAPI 原始格式解析）
+整体变成了"已废弃、仅供回退参考"的旧实现，所以再搬到
+`brokers/tests/legacy_ibeam/test_collector.py`，只更新了 import 路径
+（`brokers.ibkr.collector` -> `brokers.ibkr.legacy_ibeam.collector`），
+断言内容逐条未变——`MockIBKRClient` 本身没有变化，它一直是靠方法名
+（`get_price_history`/`_get_option_chain_raw`/`get_option_market_data`/
+`_get_iv_percentile_raw`）跟这几个 `collect_*` 函数对接的鸭子类型关系，
+不是继承，所以换目录不影响它们之间怎么协作。
 """
 from datetime import date, datetime, timezone
 
-from brokers.ibkr.collector import (
+from brokers.ibkr.legacy_ibeam.collector import (
     collect_iv_percentile,
     collect_option_chain_and_snapshot,
     collect_stock_ohlcv,

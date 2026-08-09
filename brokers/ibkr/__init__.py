@@ -1,10 +1,12 @@
-"""IBKR 券商数据读取实现（Strategy: 真实 CPAPI 客户端 + 采集解析函数）。"""
-from .client import IBKRClient
-from .collector import collect_iv_percentile, collect_option_chain_and_snapshot, collect_stock_ohlcv
+"""IBKR 券商数据读取实现。
+
+默认路径是 `IBInsyncClient`（ib_insync + IB Gateway Docker，TWS API 协议，
+见 `client.py`）。旧的 IBeam + CPAPI 实现（`IBKRClient` + `collect_*`
+解析函数）保留在 `brokers.ibkr.legacy_ibeam`，仅供回退参考，不在这里
+默认导出——需要用它时显式 `from brokers.ibkr.legacy_ibeam import ...`。
+"""
+from .client import IBInsyncClient
 
 __all__ = [
-    "IBKRClient",
-    "collect_stock_ohlcv",
-    "collect_option_chain_and_snapshot",
-    "collect_iv_percentile",
+    "IBInsyncClient",
 ]

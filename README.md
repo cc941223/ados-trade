@@ -7,7 +7,7 @@
 ## 当前阶段：M0 —— 基础设施与可行性验证
 
 ### 待办
-- [ ] 部署 IBeam + TimescaleDB + Redis（本仓库已提供 docker-compose.yml）
+- [ ] 部署 IB Gateway（ib_insync 直连）+ TimescaleDB + Redis（本仓库已提供 docker-compose.yml）
 - [ ] 首次登录完成 IBKR 2FA 确认
 - [ ] 验证 Gateway 是否正常返回账户数据
 - [ ] 将 Gateway 登出策略改为 Auto-Restart
@@ -23,7 +23,7 @@
 ## 目录结构
 ```
 ados-trade/
-├── docker-compose.yml   # IBeam + TimescaleDB + Redis
+├── docker-compose.yml   # IB Gateway + TimescaleDB + Redis
 ├── env.list.example     # 环境变量模板
 ├── engine/              # ADOS Engine 指标计算层（M2 阶段开始填充）
 ├── data/                # 数据采集脚本（M1 阶段开始填充）
