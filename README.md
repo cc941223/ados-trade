@@ -15,10 +15,11 @@
 - [ ] 直连 CPAPI 复测：Greeks 字段（7308 Delta / 7309 Gamma / 7310 Theta / 7311 Vega）
 
 ### 快速开始
-1. 复制 `env.list.example` 为 `env.list`，填入 IBKR 账号密码
-2. `docker compose up -d`
-3. 手机 IB Key 推送确认登录
-4. 验证：`curl https://localhost:5000/v1/api/portfolio/accounts -k`
+1. 复制 `env.list.example` 为 `env.list`，填入 `IBKR_USERID`/`IBKR_PASSWORD`/`VNC_PASSWORD`（如果要开启断线告警，再填 `SERVERCHAN_SENDKEY`）
+2. `docker compose up -d` 启动 `ibgateway`（以及其它服务）
+3. 用 VNC 客户端连 `<部署机器的地址>:5900`（例如 NAS 的 Tailscale IP），密码是 `VNC_PASSWORD`，连上后看到的是容器内 IB Gateway 的登录界面
+4. 在这个界面里完成 IBKR 账号密码登录 + 2FA 确认（跟平时用桌面版 IB Gateway/TWS 登录一样，只是操作的是 VNC 里的远程桌面）
+5. 验证：`python3 scripts/check_ibgateway_connection.py`（依次检查连接、账户信息、一小段真实历史数据，全部通过才算完成）
 
 ## 目录结构
 ```

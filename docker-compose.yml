@@ -19,15 +19,12 @@ services:
       - "4002:4002"
       - "5900:5900"
 
-  # ⚠️ IBKR Gateway 保活 + 掉线告警脚本——这是 IBeam/CPAPI 时代的实现
-  # （靠 HTTPS 调用 /v1/api/tickle + /v1/api/iserver/auth/status 保活），
-  # 换成 ib_insync + TWS API（socket 协议）之后这套 HTTP 轮询逻辑已经不
-  # 适用（`ibgateway` 服务没有对外暴露 CPAPI 的 HTTPS 端口），这个服务
-  # 暂时保留定义（`depends_on` 已经指到新服务名，保证 `docker compose
-  # config` 能跑通），但 `scripts/keepalive.py` 内部逻辑还是旧的，实际
-  # 跑起来会一直请求失败——这部分需要你确认新方案下"保活/掉线告警"具体
-  # 要做成什么样（TWS API 是否还需要单独轮询，还是 ib_insync 自己的连接
-  # 状态回调就够），我没有替你决定，先把这个已知不一致的地方标注出来。
+  # IB Gateway 连接监控 + 断线告警。TWS API 是长连接 socket 协议，不需要
+  # 像 CPAPI 那样定时 tickle 保活，这个脚本靠 ib_insync 的连接状态事件
+  # （connectedEvent/disconnectedEvent）监听断线，断线立刻通过 Server酱
+  # 推送微信告警，另外每 HEARTBEAT_INTERVAL（默认 60s）兜底检查一次
+  # ib.isConnected()，防止事件本身漏报。详细设计见 scripts/keepalive.py
+  # 顶部文档。
   keepalive:
     image: python:3.11-slim
     container_name: ados-keepalive
@@ -35,12 +32,17 @@ services:
     env_file:
       - env.list
     environment:
-      IBKR_GATEWAY_URL: https://ibgateway:5000
+      IBGATEWAY_HOST: ibgateway
+      IBGATEWAY_PORT: "4002"
     depends_on:
       - ibgateway
     volumes:
       - ./scripts:/scripts:ro
-    command: ["python3", "/scripts/keepalive.py"]
+    # ⚠️ keepalive.py 现在依赖 ib_insync（原来只用标准库），
+    # python:3.11-slim 这个基础镜像没有预装，用 sh -c 在启动时先装一下
+    # 再跑脚本——这是本次改造顺带补的最小化处理，如果以后依赖变多，
+    # 应该换成专门的 Dockerfile 固化镜像，而不是每次启动都重新装一遍。
+    command: ["sh", "-c", "pip install --quiet ib_insync && python3 /scripts/keepalive.py"]
 
   # 时间序列数据库
   timescaledb:
