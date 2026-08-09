@@ -1,14 +1,19 @@
-"""ibkr_collector.py 单元测试 —— 用 MockIBKRClient 构造假数据，验证解析
-结果跟 schema.sql 字段对得上，覆盖正常情况和缺字段的情况。
+"""brokers/ibkr/collector.py 单元测试 —— 用 MockIBKRClient 构造假数据，
+验证解析结果跟 schema.sql 字段对得上，覆盖正常情况和缺字段的情况。
+
+⚠️ 结构重构说明：这个文件是从 `data/collectors/tests/test_ibkr_collector.py`
+原样搬过来的，惟一改动是 import 路径（`data.collectors.ibkr_client`/
+`data.collectors.ibkr_collector` -> `brokers.mock`/`brokers.ibkr.collector`），
+断言内容逐条未变。
 """
 from datetime import date, datetime, timezone
 
-from data.collectors.ibkr_client import MockIBKRClient
-from data.collectors.ibkr_collector import (
+from brokers.ibkr.collector import (
     collect_iv_percentile,
     collect_option_chain_and_snapshot,
     collect_stock_ohlcv,
 )
+from brokers.mock import MockIBKRClient
 
 
 # ---------------------------------------------------------------------------
