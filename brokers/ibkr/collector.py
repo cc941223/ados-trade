@@ -1,5 +1,18 @@
 """IBKR 数据采集：正股 OHLCV / 期权链+行情快照 / IV 百分位。
 
+⚠️ 结构重构说明：这个文件是从 `data/collectors/ibkr_collector.py`
+原样搬过来的（本次是纯结构调整，不改变任何解析逻辑）。惟一的改动是：
+`collect_option_chain_and_snapshot` 和 `collect_iv_percentile` 调用的
+客户端方法名从 `client.get_option_chain(...)`/`client.get_iv_percentile(...)`
+改成了 `client._get_option_chain_raw(...)`/`client._get_iv_percentile_raw(...)`
+——因为 `IBKRClient` 现在要实现 `brokers.base.BrokerClient` 定义的统一接口，
+而那个接口里也有名叫 `get_option_chain`/`get_iv_percentile` 的方法（返回
+`data/schema.sql` 表结构的行），跟这里原来"CPAPI 原始返回格式"的同名方法
+签名不同、返回格式也不同，两者不能同时用同一个方法名挂在 `IBKRClient`
+上，所以把这两个「返回 CPAPI 原始格式」的方法改成了私有命名
+（见 `client.py` 里的重命名说明）。除了这两处方法名调用之外，本文件
+每个函数的解析逻辑（字段映射、None 处理规则等）逐行未变。
+
 每个 `collect_*` 函数职责一致：调用 `IBKRClient`（或 `MockIBKRClient`）
 拿到假想的 API 原始返回，再用对应的 `_parse_*` 函数把它转换成跟
 `data/schema.sql` 表字段一一对应的 dict 列表——每个 dict 就是"待写入
@@ -12,9 +25,13 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
-from .ibkr_client import IBKRClient
+if TYPE_CHECKING:
+    # 只在静态类型检查时导入，避免和 client.py 互相 import 造成循环依赖
+    # （client.py 需要在模块顶层导入这个文件里的 collect_* 函数，来实现
+    # `brokers.base.BrokerClient` 定义的统一接口方法）。
+    from .client import IBKRClient
 
 
 def _epoch_ms_to_datetime(epoch_ms: int) -> datetime:
@@ -22,7 +39,7 @@ def _epoch_ms_to_datetime(epoch_ms: int) -> datetime:
 
 
 def collect_stock_ohlcv(
-    client: IBKRClient,
+    client: "IBKRClient",
     symbol: str,
     timeframe: str,
     start: Optional[str] = None,
@@ -60,7 +77,7 @@ def _parse_ohlcv_bar(symbol: str, timeframe: str, bar: dict) -> dict:
 
 
 def collect_option_chain_and_snapshot(
-    client: IBKRClient, underlying: str, expiration_date: date
+    client: "IBKRClient", underlying: str, expiration_date: date
 ) -> tuple[list[dict], list[dict]]:
     """采集某个到期日的期权链结构 + 行情快照，对应 `option_contracts` +
     `option_snapshot` 两张表。
@@ -87,7 +104,7 @@ def collect_option_chain_and_snapshot(
       contract_id/ts/last_price/bid/ask/volume/open_interest/implied_vol/
       delta/gamma/theta/vega。
     """
-    raw_contracts = client.get_option_chain(underlying, expiration_date)
+    raw_contracts = client._get_option_chain_raw(underlying, expiration_date)
     contract_rows = [_parse_option_contract(underlying, expiration_date, c) for c in raw_contracts]
 
     contract_ids = [row["contract_id"] for row in contract_rows]
@@ -129,7 +146,7 @@ def _parse_option_snapshot(snapshot: dict, ts: datetime) -> dict:
     }
 
 
-def collect_iv_percentile(client: IBKRClient, symbol: str, ts: Optional[datetime] = None) -> list[dict]:
+def collect_iv_percentile(client: "IBKRClient", symbol: str, ts: Optional[datetime] = None) -> list[dict]:
     """采集 IV 百分位（13/26/52 周三个周期），对应 `iv_percentile` 表。
 
     Parameters
@@ -144,7 +161,7 @@ def collect_iv_percentile(client: IBKRClient, symbol: str, ts: Optional[datetime
     symbol/ts/period/percentile。某个周期数据缺失时该行 `percentile` 为
     `None`，不会因为缺一个周期就漏掉另外两个周期的行。
     """
-    raw = client.get_iv_percentile(symbol)
+    raw = client._get_iv_percentile_raw(symbol)
     row_ts = ts or datetime.now(timezone.utc)
 
     return [

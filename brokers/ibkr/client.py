@@ -7,29 +7,58 @@
 反而容易埋下"看起来实现了但从没跑通过"的假象。等 IBeam 部署好、能实际
 发请求验证字段名之后，再把 `NotImplementedError` 换成真实的 HTTP 调用。
 
-`MockIBKRClient` 是给测试/开发用的假实现，返回构造好的固定假数据，不发
-任何网络请求，方法签名跟 `IBKRClient` 完全一致，采集函数
-（`ibkr_collector.py`）不关心传进来的是真实客户端还是 Mock，这就是"可
-替换的客户端接口层"的意思。
-
 ⚠️ 已通过 IBKR MCP 连接器/官方文档验证过的 CPAPI 字段，目前只有 Delta
 (7308)/Gamma(7309)/Theta(7310)/Vega(7311) 这四个（见规格书第 12 章）。
 Last/Bid/Ask/Volume/Open Interest 等其它字段的具体 field code，需要直连
 CPAPI 之后对照官方文档核实，本文件里的方法只按"语义"命名（`last`/
 `bid`/`ask`/...），不在注释里编造具体 field code 数字，避免以后被当成
 "已验证事实"误用。
+
+⚠️ 结构重构说明（本次从 `data/collectors/ibkr_client.py` 原样搬过来）：
+
+- 这个文件原来同时定义 `IBKRClient` 和 `MockIBKRClient`；`MockIBKRClient`
+  现在搬到了 `brokers/mock/client.py`（对应 `brokers/mock/` 独立目录），
+  这里只保留 `IBKRClient`。
+- 新增了 `IBKRClient` 对 `brokers.base.BrokerClient` 统一接口的实现
+  （`get_stock_ohlcv`/`get_option_chain`/`get_option_snapshot`/
+  `get_iv_percentile` 四个方法），内部直接委托给 `collector.py` 里原有
+  的 `collect_*` 解析函数，解析逻辑本身逐行未变。
+- 原来两个返回"CPAPI 原始格式"的方法改了名字，加了下划线前缀：
+  `get_option_chain` -> `_get_option_chain_raw`，
+  `get_iv_percentile` -> `_get_iv_percentile_raw`。
+  这是因为 `BrokerClient` 接口里也有同名的 `get_option_chain`/
+  `get_iv_percentile`，但那两个方法返回的是 `data/schema.sql` 表结构的行
+  （schema 形状），跟这里"CPAPI 原始返回格式"（`conid`/`strike`/`right`
+  这种字段名）完全不是一回事，一个类不能用同一个名字挂两个不同签名/
+  语义的方法，所以把原始格式的那两个改成私有命名腾出位置。
+  `get_price_history`/`get_option_market_data` 这两个原始方法名跟接口
+  没有冲突，维持原名不变。全文搜索确认过，除了这个文件和
+  `collector.py` 内部，没有任何其它代码直接按名字调用这四个原始方法，
+  改名不影响任何已有测试。
 """
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Optional
 
+from ..base import BrokerClient
+from .collector import (
+    _parse_option_contract,
+    _parse_option_snapshot,
+    collect_iv_percentile,
+    collect_stock_ohlcv,
+)
 
-class IBKRClient:
+
+class IBKRClient(BrokerClient):
     """CPAPI 客户端接口，真实实现留空。
 
     方法签名先按"采集函数需要什么"设计好，等直连 Gateway 之后再逐个实现。
     """
+
+    # ------------------------------------------------------------------
+    # CPAPI 原始格式方法（真实实现待补，目前全部 raise NotImplementedError）
+    # ------------------------------------------------------------------
 
     def get_price_history(
         self, symbol: str, timeframe: str, start: Optional[str] = None, end: Optional[str] = None
@@ -47,11 +76,11 @@ class IBKRClient:
         Returns
         -------
         list[dict]，每个 dict 是一根 K 线的原始返回（真实字段名待验证），
-        由 `ibkr_collector._parse_ohlcv_bar` 解析成 `stock_ohlcv` 表的行。
+        由 `collector._parse_ohlcv_bar` 解析成 `stock_ohlcv` 表的行。
         """
         raise NotImplementedError("直连 CPAPI 的实现待 IBeam 网关搭好后补上")
 
-    def get_option_chain(self, underlying: str, expiration_date: date) -> list[dict]:
+    def _get_option_chain_raw(self, underlying: str, expiration_date: date) -> list[dict]:
         """某个到期日的期权链结构（行使价 + 合约 ID），对应 CPAPI
         `/iserver/secdef/strikes` + `/iserver/secdef/info` 两步调用组合
         （先拿行使价列表，再逐个行使价查 conid）。
@@ -59,7 +88,7 @@ class IBKRClient:
         Returns
         -------
         list[dict]，每个 dict 至少含合约 ID、行使价、Call/Put 标记（真实
-        字段名待验证），由 `ibkr_collector._parse_option_contract` 解析成
+        字段名待验证），由 `collector._parse_option_contract` 解析成
         `option_contracts` 表的行。
         """
         raise NotImplementedError("直连 CPAPI 的实现待 IBeam 网关搭好后补上")
@@ -72,12 +101,12 @@ class IBKRClient:
         -------
         list[dict]，每个 dict 对应一个合约的快照（真实字段名待验证，
         Delta/Gamma/Theta/Vega 已确认是 field code 7308-7311），由
-        `ibkr_collector._parse_option_snapshot` 解析成 `option_snapshot`
+        `collector._parse_option_snapshot` 解析成 `option_snapshot`
         表的行。
         """
         raise NotImplementedError("直连 CPAPI 的实现待 IBeam 网关搭好后补上")
 
-    def get_iv_percentile(self, symbol: str) -> dict:
+    def _get_iv_percentile_raw(self, symbol: str) -> dict:
         """IV 百分位（13/26/52 周），对应 CPAPI 现成字段
         `implied_volatility_percentile`（规格书 3.1 节已确认存在，具体
         怎么区分 13/26/52 周三个周期待直连后确认）。
@@ -85,63 +114,29 @@ class IBKRClient:
         Returns
         -------
         dict，含三个周期的百分位数值，由
-        `ibkr_collector._parse_iv_percentile` 解析成 `iv_percentile`
+        `collector._parse_iv_percentile` 解析成 `iv_percentile`
         表的三行（每个周期一行）。
         """
         raise NotImplementedError("直连 CPAPI 的实现待 IBeam 网关搭好后补上")
 
+    # ------------------------------------------------------------------
+    # brokers.base.BrokerClient 统一接口实现——委托给 collector.py 里的
+    # collect_* 解析函数，本身不包含任何新的解析逻辑。
+    # ------------------------------------------------------------------
 
-class MockIBKRClient(IBKRClient):
-    """测试/开发用的假实现，返回构造好的固定假数据，不发任何网络请求。
-
-    默认数据是硬编码的固定值（不是随机生成），方便测试里手算核对解析结果；
-    也可以在构造时传 `fixture` 覆盖，测试"缺字段"等边界情况。
-    """
-
-    def __init__(self, fixture: Optional[dict] = None):
-        self._fixture = fixture or {}
-
-    def get_price_history(
+    def get_stock_ohlcv(
         self, symbol: str, timeframe: str, start: Optional[str] = None, end: Optional[str] = None
     ) -> list[dict]:
-        if "price_history" in self._fixture:
-            return self._fixture["price_history"]
-        # 假想的 CPAPI 历史数据返回格式：t=epoch毫秒，o/h/l/c=开高低收，v=成交量
-        return [
-            {"t": 1735689600000, "o": 190.0, "h": 192.5, "l": 189.0, "c": 191.2, "v": 45_000_000},
-            {"t": 1735776000000, "o": 191.5, "h": 193.0, "l": 190.5, "c": 192.8, "v": 38_000_000},
-        ]
+        return collect_stock_ohlcv(self, symbol, timeframe, start, end)
 
     def get_option_chain(self, underlying: str, expiration_date: date) -> list[dict]:
-        if "option_chain" in self._fixture:
-            return self._fixture["option_chain"]
-        return [
-            {"conid": 500001, "strike": 190.0, "right": "C"},
-            {"conid": 500002, "strike": 195.0, "right": "C"},
-            {"conid": 500003, "strike": 190.0, "right": "P"},
-            {"conid": 500004, "strike": 195.0, "right": "P"},
-        ]
+        raw_contracts = self._get_option_chain_raw(underlying, expiration_date)
+        return [_parse_option_contract(underlying, expiration_date, c) for c in raw_contracts]
 
-    def get_option_market_data(self, contract_ids: list[int]) -> list[dict]:
-        if "option_market_data" in self._fixture:
-            return self._fixture["option_market_data"]
-        fake_snapshots = {
-            500001: {"conid": 500001, "last": 5.20, "bid": 5.10, "ask": 5.30, "volume": 1200,
-                     "open_interest": 4500, "implied_vol": 0.28, "delta": 0.62, "gamma": 0.04,
-                     "theta": -0.05, "vega": 0.12},
-            500002: {"conid": 500002, "last": 2.10, "bid": 2.00, "ask": 2.20, "volume": 800,
-                     "open_interest": 3000, "implied_vol": 0.26, "delta": 0.35, "gamma": 0.05,
-                     "theta": -0.04, "vega": 0.10},
-            500003: {"conid": 500003, "last": 4.80, "bid": 4.70, "ask": 4.90, "volume": 950,
-                     "open_interest": 4100, "implied_vol": 0.29, "delta": -0.38, "gamma": 0.04,
-                     "theta": -0.05, "vega": 0.12},
-            500004: {"conid": 500004, "last": 7.50, "bid": 7.35, "ask": 7.65, "volume": 600,
-                     "open_interest": 2200, "implied_vol": 0.27, "delta": -0.65, "gamma": 0.05,
-                     "theta": -0.04, "vega": 0.10},
-        }
-        return [fake_snapshots[cid] for cid in contract_ids if cid in fake_snapshots]
+    def get_option_snapshot(self, contract_ids: list[int]) -> list[dict]:
+        raw_snapshots = self.get_option_market_data(contract_ids)
+        snapshot_ts = datetime.now(timezone.utc)
+        return [_parse_option_snapshot(s, snapshot_ts) for s in raw_snapshots]
 
-    def get_iv_percentile(self, symbol: str) -> dict:
-        if "iv_percentile" in self._fixture:
-            return self._fixture["iv_percentile"]
-        return {"13w": 45.2, "26w": 52.8, "52w": 61.5}
+    def get_iv_percentile(self, symbol: str, ts: Optional[datetime] = None) -> list[dict]:
+        return collect_iv_percentile(self, symbol, ts)
