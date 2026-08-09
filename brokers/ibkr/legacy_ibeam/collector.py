@@ -1,5 +1,12 @@
 """IBKR 数据采集：正股 OHLCV / 期权链+行情快照 / IV 百分位。
 
+⚠️ **已废弃，不再是默认连接方案**：跟同目录 `client.py` 一样，这个文件
+连同它解析的"CPAPI 原始返回格式"整体属于已经换掉的 IBeam 方案，只保留
+供回退参考，不再是 `brokers.ibkr` 的默认导出。新代码走
+`brokers/ibkr/client.py` 里的 `IBInsyncClient`。
+
+以下是换方案之前的原始说明（未改动，仅供参考）：
+
 ⚠️ 结构重构说明：这个文件是从 `data/collectors/ibkr_collector.py`
 原样搬过来的（本次是纯结构调整，不改变任何解析逻辑）。惟一的改动是：
 `collect_option_chain_and_snapshot` 和 `collect_iv_percentile` 调用的
